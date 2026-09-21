@@ -1,6 +1,8 @@
 package com.bemodel.cs;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.bemodel.cs.mapper.ReconDiffMapper;
 import com.bemodel.datasource.service.DatasourceService;
 import com.bemodel.link.entity.LinkNode;
 import com.bemodel.link.service.LinkService;
@@ -37,11 +39,17 @@ class CsServiceTest {
     private DatasourceService datasourceService;
     @Autowired
     private com.bemodel.cs.mapper.CsFeedbackMapper csFeedbackMapper;
+    @Autowired
+    private ReconDiffMapper reconDiffMapper;
+
+    /** 水位线：核对类测试会向 bm_recon_diff 落批次，结束只清理本次新增行 */
+    private long reconWatermark;
 
     private LinkNode ticket;
 
     @BeforeEach
     void setUp() {
+        reconWatermark = reconWatermark();
         ticket = new LinkNode();
         ticket.setNodeType("TICKET");
         ticket.setRefNo("TEST-CS-001");
@@ -61,6 +69,13 @@ class CsServiceTest {
         caseMapper.delete(new LambdaQueryWrapper<RcaCase>().eq(RcaCase::getTicketRef, "TEST-CS-001"));
         JdbcTemplate charge = datasourceService.jdbc("DS_CHARGE");
         charge.update("DELETE FROM refund_apply WHERE reason LIKE '%TEST-CS-001%'");
+        reconDiffMapper.delete(new LambdaQueryWrapper<ReconDiff>().gt(ReconDiff::getId, reconWatermark));
+    }
+
+    private long reconWatermark() {
+        Object v = reconDiffMapper.selectObjs(new QueryWrapper<ReconDiff>()
+                .select("COALESCE(MAX(id),0) AS mid")).stream().findFirst().orElse(0);
+        return v == null ? 0 : ((Number) v).longValue();
     }
 
     @Test
@@ -85,13 +100,13 @@ class CsServiceTest {
     void askShouldRouteDispensePayQuestion() {
         Map<String, Object> r = csService.ask("没缴费可以发药吗？");
 
-        assertEquals("缴费发药双向核对", r.get("intent"), "缴费发药问题应路由到双向核对");
+        assertEquals("缴费发药双向核对（语义档）", r.get("intent"), "缴费发药问题应路由到语义档双向核对");
         assertEquals("RULE", r.get("router"));
         List<Map<String, Object>> evidence = (List<Map<String, Object>>) r.get("evidence");
         assertTrue(evidence.stream().anyMatch(e -> String.valueOf(e.get("label")).contains("先药后费")),
                 "证据应含先药后费方向");
-        assertTrue(evidence.stream().anyMatch(e -> String.valueOf(e.get("label")).contains("已缴费未发药")),
-                "证据应含已缴费未发药方向");
+        assertTrue(evidence.stream().anyMatch(e -> String.valueOf(e.get("label")).contains("真滞留")),
+                "证据应含已缴费未发药的真实滞留档（B 方向语义化结论）");
         assertTrue(String.valueOf(r.get("answer")).contains("缴费是发药的前置环节"));
     }
 
@@ -123,10 +138,10 @@ class CsServiceTest {
     void askShouldForkRoutingByScene() {
         // 同一句话两个场景走不同分支：客服场景命中专属核对处理器，问数场景进语义层
         Map<String, Object> cs = csService.ask("没缴费可以发药吗？", CsService.SCENE_CS);
-        assertEquals("缴费发药双向核对", cs.get("intent"), "客服场景应走专属核对处理器");
+        assertEquals("缴费发药双向核对（语义档）", cs.get("intent"), "客服场景应走语义档专属核对处理器");
 
         Map<String, Object> qa = csService.ask("没缴费可以发药吗？", CsService.SCENE_ANALYTICS);
-        assertNotEquals("缴费发药双向核对", qa.get("intent"), "问数场景不应落入客服专属处理器");
+        assertNotEquals("缴费发药双向核对（语义档）", qa.get("intent"), "问数场景不应落入客服专属处理器");
         // 无 Key 时语义层不可用：应降级为问数兜底菜单（场景引导），而非客服菜单
         assertEquals("场景引导", qa.get("intent"), "问数场景应落问数兜底菜单");
     }

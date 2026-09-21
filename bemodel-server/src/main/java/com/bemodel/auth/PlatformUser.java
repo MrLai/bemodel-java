@@ -15,7 +15,7 @@ public class PlatformUser {
     private String username;
     private String passwordHash;
     private String displayName;
-    /** ADMIN/EDITOR/VIEWER */
+    /** ADMIN/EDITOR/REVIEWER/VIEWER */
     private String role;
     private LocalDateTime createdAt;
 }

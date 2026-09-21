@@ -188,11 +188,16 @@
                   layout="force"
                   height="460px"
                   :loading="loadingGraph"
+                  :tooltip-formatter="graphTooltip"
                   @node-click="onGraphNodeClick"
                 />
                 <div class="graph-legend-tip">
                   <span class="gl-item"><i class="gl-dot gl-center" />当前概念</span>
                   <span class="gl-item"><i class="gl-dot gl-neighbor" />相邻概念</span>
+                  <span class="gl-item"><i class="gl-line gl-relation" />关系（绿实线）</span>
+                  <span class="gl-item"><i class="gl-line gl-transitive" />可传递（橙色虚线）</span>
+                  <span class="gl-item"><i class="gl-arrow">⇄</i>对称（双向箭头）</span>
+                  <span class="gl-item">· 尾缀＝约束公理，悬停关系边看含义</span>
                   <span class="gl-item"><i class="gl-line gl-disjoint" />互斥（红色虚线）</span>
                   <span class="gl-item">点击相邻节点切换概念</span>
                 </div>
@@ -382,7 +387,9 @@
               <el-input v-model="conceptForm.definition" type="textarea" :rows="3" />
             </el-form-item>
             <el-form-item label="负责人">
-              <el-input v-model="conceptForm.owner" />
+              <!-- 编辑态禁用：服务端白名单已剥离 owner（负责人移交是独立动作，本版不开放），
+                   保留可编辑输入会造成「提示成功但永不生效」的静默丢弃 -->
+              <el-input v-model="conceptForm.owner" :disabled="conceptDialogMode === 'edit'" />
             </el-form-item>
             <el-form-item label="IRI">
               <el-input
@@ -940,6 +947,7 @@ import {
 } from '../../api/ontology'
 import { getArchitectureOverview } from '../../api/architecture'
 import { statusText, statusTagType } from '../../utils/dict'
+import { axiomSuffixOf, axiomStyleOf, axiomTooltipOf } from '../../utils/axiomEdge'
 import { useConceptStore } from '../../store/concept'
 import { useUserStore } from '../../store/user'
 import GraphCanvas from '../../components/GraphCanvas.vue'
@@ -956,10 +964,11 @@ const route = useRoute()
 const activeTab = ref('modeling')
 
 // ---------- 概念状态机 ----------
-// DRAFT→REVIEW→PUBLISHED→DEPRECATED，REVIEW 可回 DRAFT
+// DRAFT→REVIEW→PUBLISHED→DEPRECATED，REVIEW 可回 DRAFT；
+// DRAFT/REVIEW 可直达 DEPRECATED（维护治理加固 H2：未发布概念的废弃=撤销，建模员即可）
 const transitions = {
-  DRAFT: ['REVIEW'],
-  REVIEW: ['PUBLISHED', 'DRAFT'],
+  DRAFT: ['REVIEW', 'DEPRECATED'],
+  REVIEW: ['PUBLISHED', 'DRAFT', 'DEPRECATED'],
   PUBLISHED: ['DEPRECATED'],
   DEPRECATED: []
 }
@@ -1391,11 +1400,13 @@ const neighborhood = computed(() => {
     if (e.source !== cid && e.target !== cid) continue
     nodeIds.add(e.source)
     nodeIds.add(e.target)
+    const style = axiomStyleOf(e, '#95d475', { width: 1.5, curveness: 0.12 })
     edges.push({
       source: e.source,
       target: e.target,
-      label: { show: true, formatter: e.label || '', fontSize: 11, color: '#909399' },
-      lineStyle: { color: '#95d475', width: 1.5, curveness: 0.12 }
+      label: { show: true, formatter: (e.label || '') + axiomSuffixOf(e), fontSize: 11, color: '#909399' },
+      ...style,
+      _raw: e
     })
   }
   for (const d of disjointPairs.value) {
@@ -1425,6 +1436,18 @@ const neighborhood = computed(() => {
 })
 const graphNodes = computed(() => neighborhood.value.nodes)
 const graphEdges = computed(() => neighborhood.value.edges)
+
+// 边 tooltip：关系名+公理尾缀+逐条人话解释（spec §4）
+const graphTooltip = (p) => {
+  if (p.dataType === 'edge') {
+    const e = p.data._raw
+    if (!e) return '互斥' // 互斥边无 _raw，label 是对象不能直接回显
+    const lines = [`<b>${e.label || ''}</b>${axiomSuffixOf(e)}`]
+    for (const l of axiomTooltipOf(e)) lines.push(`<br/>${l}`)
+    return lines.join('')
+  }
+  return p.data.name || ''
+}
 
 const onGraphNodeClick = async (node) => {
   if (!node._code || node._code === detail.value.concept?.code) return
@@ -1862,6 +1885,24 @@ onMounted(async () => {
   width: 20px;
   border-top: 2px dashed #f56c6c;
   display: inline-block;
+}
+
+.gl-line.gl-relation {
+  width: 20px;
+  border-top: 2px solid #95d475;
+  display: inline-block;
+}
+
+.gl-line.gl-transitive {
+  width: 20px;
+  border-top: 2px dashed #e6a23c;
+  display: inline-block;
+}
+
+.gl-arrow {
+  font-style: normal;
+  color: #606266;
+  font-weight: 700;
 }
 
 .disjoint-cross {

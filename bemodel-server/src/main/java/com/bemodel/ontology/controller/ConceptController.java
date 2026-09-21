@@ -38,8 +38,8 @@ public class ConceptController {
 
     @PutMapping
     public Result<Concept> update(@RequestBody Concept concept) {
-        conceptService.updateById(concept);
-        return Result.ok(concept);
+        // 字段白名单（维护治理加固 H1）：前端可传任意字段，code/status/version/owner 由服务层剥离
+        return Result.ok(conceptService.updateContent(concept));
     }
 
     @PostMapping("/transition/{code}")

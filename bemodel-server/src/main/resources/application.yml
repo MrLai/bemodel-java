@@ -12,6 +12,7 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # 演示数据源种子(V3 等)的连接账号走 Flyway placeholders，与平台库账号同源
     placeholders:
       demo_db_username: ${MYSQL_USERNAME:}
       demo_db_password: ${MYSQL_PASSWORD:}
@@ -34,6 +35,23 @@ deepseek:
   api-key: ${DEEPSEEK_API_KEY:}
   model: deepseek-v4-flash
   timeout-seconds: 30
+  # F1：输出上限与按调用类型超时（秒）——未列出的 callType 回落全局值；代码内置 MAPPING_SUGGEST=90
+  max-tokens: 4096
+  call-timeouts:
+    MAPPING_SUGGEST: 90
+    LAB_A: 60
+    LAB_B: 60
+  call-max-tokens:
+    LAB_A: 2048
+    LAB_B: 2048
+  # 借鉴 4：主备双端点路由——backup.api-key 空 = 无备路（行为与单提供方时代逐字节一致）。
+  # 启用备路：export DEEPSEEK_BACKUP_BASE_URL=... DEEPSEEK_BACKUP_API_KEY=...（model 空=同主路模型）
+  backup:
+    base-url: ${DEEPSEEK_BACKUP_BASE_URL:}
+    api-key: ${DEEPSEEK_BACKUP_API_KEY:}
+    model: ${DEEPSEEK_BACKUP_MODEL:}
+  # 按 callType 指定主路（"primary"|"backup"）：未列出的 callType 走主路；值非法回落主路
+  call-primary-route: {}
 
 # 安全：JWT 签名密钥 / 字段级加密密钥（默认值为演示便利，生产必须经环境变量覆盖）
 jwt:
@@ -45,6 +63,16 @@ app:
 bemodel:
   inspect:
     cron: "0 0/30 * * * *"
+  mapping:
+    # F1：AI 映射列分批大小与概念 Top-K 预筛上限（Top-K <=0 视为不筛）；
+    # LLM 阶段总时间预算（秒）——超预算批次就地规则兜底，最坏总时长后端自持
+    llm-batch-size: 25
+    top-k-concepts: 25
+    llm-budget-seconds: 280
+  lab:
+    # AI 对比实验室(Plan 1):沙箱库名与单臂预算;克隆清单默认 12 表见 LabProps
+    db-name: bemodel_lab
+    arm-budget-seconds: 90
 
 logging:
   level:

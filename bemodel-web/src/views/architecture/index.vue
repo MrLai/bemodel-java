@@ -75,6 +75,12 @@
           @node-click="onNodeClick"
         />
       </div>
+      <div class="edge-legend-tip">
+        <span class="gl-item"><i class="gl-line gl-relation" />关系（绿实线）</span>
+        <span class="gl-item"><i class="gl-line gl-transitive" />可传递（橙色虚线）</span>
+        <span class="gl-item"><i class="gl-arrow">⇄</i>对称（双向箭头）</span>
+        <span class="gl-item">· 尾缀＝约束公理，悬停关系边看含义</span>
+      </div>
     </el-card>
 
     <!-- 四层语义架构全景（移植自 demo 架构全貌） -->
@@ -91,6 +97,7 @@ import { Search } from '@element-plus/icons-vue'
 import GraphCanvas from '../../components/GraphCanvas.vue'
 import PanoramaGraph from './PanoramaGraph.vue'
 import { getArchitectureOverview } from '../../api/architecture'
+import { axiomSuffixOf, axiomStyleOf, axiomTooltipOf } from '../../utils/axiomEdge'
 
 const router = useRouter()
 
@@ -315,15 +322,26 @@ const chartEdges = computed(() =>
       nodeOpacityById.value.get(e.source) ?? 1,
       nodeOpacityById.value.get(e.target) ?? 1
     )
+    if (e.kind !== 'RELATION') {
+      return {
+        source: e.source,
+        target: e.target,
+        lineStyle: {
+          color: EDGE_COLOR[e.kind] || '#c0c4cc',
+          opacity: Math.max(dim * 0.9, 0.04),
+          curveness: 0.05,
+          width: e.kind === 'MAPPING' ? 0.8 : 1.2
+        },
+        _raw: e
+      }
+    }
+    const style = axiomStyleOf(e, EDGE_COLOR.RELATION, { width: 1.2, curveness: 0.18 })
     return {
       source: e.source,
       target: e.target,
-      lineStyle: {
-        color: EDGE_COLOR[e.kind] || '#c0c4cc',
-        opacity: Math.max(dim * 0.9, 0.04),
-        curveness: e.kind === 'RELATION' ? 0.18 : 0.05,
-        width: e.kind === 'MAPPING' ? 0.8 : 1.2
-      },
+      label: { show: true, formatter: (e.label || '') + axiomSuffixOf(e), fontSize: 11, color: '#909399' },
+      ...style,
+      lineStyle: { ...style.lineStyle, opacity: Math.max(dim * 0.9, 0.04) },
       _raw: e
     }
   })
@@ -336,7 +354,12 @@ const nodeTooltip = (p) => {
       { BELONG: '归属', RELATION: '关系', MAPPING: '映射', DS_TABLE: '包含', RULE_BIND: '绑定规则', METRIC_BIND: '绑定指标' }[
         e.kind
       ] || e.kind
-    return `<b>${kindText}</b>${e.label ? `：${e.label}` : ''}`
+    let html = `<b>${kindText}</b>${e.label ? `：${e.label}` : ''}`
+    if (e.kind === 'RELATION') {
+      html += axiomSuffixOf(e)
+      for (const l of axiomTooltipOf(e)) html += `<br/>${l}`
+    }
+    return html
   }
   const n = p.data._raw
   if (!n) return ''
@@ -471,5 +494,39 @@ onMounted(async () => {
 .canvas-scroll {
   overflow: auto;
   max-height: calc(100vh - 280px);
+}
+
+.edge-legend-tip {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  padding: 8px 4px 0;
+  font-size: 12px;
+  color: #909399;
+}
+
+.edge-legend-tip .gl-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.edge-legend-tip .gl-line {
+  width: 20px;
+  display: inline-block;
+}
+
+.edge-legend-tip .gl-line.gl-relation {
+  border-top: 2px solid #95d475;
+}
+
+.edge-legend-tip .gl-line.gl-transitive {
+  border-top: 2px dashed #e6a23c;
+}
+
+.edge-legend-tip .gl-arrow {
+  font-style: normal;
+  color: #606266;
+  font-weight: 700;
 }
 </style>

@@ -1,5 +1,6 @@
 package com.bemodel.clinical;
 
+import com.bemodel.common.Masking;
 import com.bemodel.datasource.service.DatasourceService;
 import com.bemodel.link.entity.LinkNode;
 import com.bemodel.link.service.LinkService;
@@ -60,17 +61,18 @@ public class AlertService {
             }
             Map<String, Object> patient = his.queryForMap(
                     "SELECT patient_name, dept, ward FROM inpatient WHERE inhos_no = ?", inhosNo);
+            String patientName = Masking.maskName(String.valueOf(patient.get("patient_name")));
             LinkNode alert = new LinkNode();
             alert.setNodeType("ALERT");
             alert.setRefNo(refNo);
             alert.setTitle(String.format("危急值预警：%s %s 检验结果异常未处置",
-                    patient.get("patient_name"), ab.get("item_name")));
+                    patientName, ab.get("item_name")));
             alert.setConceptCode("LAB_REPORT");
             alert.setStatus("待处置");
             alert.setOccurredAt(LocalDateTime.now());
             alert.setPayload(String.format(
                     "{\"patient\":\"%s\",\"inhos_no\":\"%s\",\"dept\":\"%s\",\"item\":\"%s\",\"report_id\":\"%s\",\"report_time\":\"%s\",\"basis\":\"RULE-QC-003/AX-004\",\"suggestion\":\"请 %s 立即核实患者状态并补录诊断或处置医嘱\"}",
-                    patient.get("patient_name"), inhosNo, patient.get("dept"), ab.get("item_name"),
+                    patientName, inhosNo, patient.get("dept"), ab.get("item_name"),
                     ab.get("report_id"), ab.get("report_time"), patient.get("dept")));
             linkService.save(alert);
             created.add(Map.of("refNo", refNo, "title", alert.getTitle()));

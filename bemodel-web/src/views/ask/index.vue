@@ -27,8 +27,29 @@
           <div v-else class="msg msg-ai">
             <div class="ai-avatar">Bm</div>
             <div class="bubble bubble-ai">
+              <!-- 澄清卡：A 型歧义缺口，由后端 clarifyTask 字段存在性驱动渲染（不做文本嗅探） -->
+              <template v-if="msg.clarify">
+                <div class="clarify-card">
+                  <div class="clarify-title"><el-icon><ChatDotRound /></el-icon> 需要您补充信息后继续查询</div>
+                  <div class="clarify-q">{{ msg.clarify.question }}</div>
+                  <div class="clarify-input">
+                    <el-input
+                      v-model="clarifyInput"
+                      placeholder="补充时间范围、科室、统计口径等约束"
+                      :disabled="clarifying"
+                      @keydown.enter.exact.prevent="submitClarify(msg)"
+                    />
+                    <el-button type="primary" :loading="clarifying" :disabled="!clarifyInput.trim()" @click="submitClarify(msg)">
+                      提交补充
+                    </el-button>
+                  </div>
+                  <div class="clarify-foot">
+                    第 {{ msg.clarify.rounds }}/2 轮追问 · 提交后将从原问题带约束重查（最多澄清 2 轮，未收敛将连同证据回流概念缺口）
+                  </div>
+                </div>
+              </template>
               <!-- 增长回路卡：语义层答不了，已回流概念缺口 -->
-              <template v-if="msg.unanswered">
+              <template v-else-if="msg.unanswered">
                 <div class="unans-card">
                   <div class="unans-title"><el-icon><Opportunity /></el-icon> 这个问题超出了当前本体的覆盖范围</div>
                   <div class="unans-body">{{ msg.text }}</div>
@@ -48,6 +69,7 @@
                     {{ routeText(msg.router) }}
                   </el-tag>
                   <span class="ans-intent">{{ msg.intent }}</span>
+                  <el-tag v-if="msg.clarified" size="small" type="success" effect="plain">根据你的补充已答出</el-tag>
                   <el-icon
                     v-if="msg.parse"
                     class="parse-jump"
@@ -204,7 +226,7 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { askCs } from '../../api/cs'
+import { askCs, answerClarify } from '../../api/cs'
 import { ChatDotRound, Opportunity, Promotion, DataLine, ArrowDown, ArrowRight } from '@element-plus/icons-vue'
 
 // 建议问题：问数场景样例（口径/明细/统计），与 AI 客服页（服务处置样例）零重叠
@@ -225,7 +247,9 @@ const routeTagType = (r) => ROUTE_TYPE[r] || 'info'
 const route = useRoute()
 const input = ref('')
 const asking = ref(false)
-const messages = ref([]) // {role:'user'|'ai', text, router, intent, evidence, links, parse, unanswered, card, metric}
+const messages = ref([]) // {role:'user'|'ai', text, router, intent, evidence, links, parse, unanswered, card, metric, clarify, clarified}
+const clarifyInput = ref('') // 澄清卡补充输入（当前活跃卡的缓冲）
+const clarifying = ref(false)
 const activeIdx = ref(-1) // 当前解析面板展示的消息下标
 const sqlOpen = ref(false)
 const flowRef = ref(null)
@@ -275,35 +299,7 @@ const ask = async (q) => {
   asking.value = true
   try {
     const res = await askCs(q, 'ANALYTICS')
-    // 语义层答不了（已回流增长回路）→ 增长回路卡；missRecorded 为后端显式标记，不做字符串嗅探
-    const unanswered = res.missRecorded === true
-      || (!res.router && typeof res.answer === 'string' && res.answer.includes('本体完善提案'))
-    // 口径卡回答：结构化内容交给卡片，正文只保留 LLM 自然语言解读，避免与卡片重复
-    const isCard = res.card === 'METRIC' && !!res.metric
-    const msg = {
-      role: 'ai',
-      text: isCard ? res.answerLlm || '' : res.answer,
-      card: res.card,
-      metric: res.metric,
-      router: res.router,
-      intent: res.intent,
-      evidence: res.evidence,
-      links: res.links,
-      unanswered
-    }
-    // 语义查询 → 组装右侧解析面板（概念/关系/查询逻辑/原始行，全部来自真实结构）
-    if (res.router === 'SEMANTIC') {
-      const sqlEv = (res.evidence || []).find((e) => e.label === '执行SQL')
-      msg.parse = {
-        matchedConcepts: res.matchedConcepts || [],
-        relations: res.relations || [],
-        semantics: res.semantics,
-        sql: sqlEv?.value,
-        rows: res.rows || []
-      }
-    }
-    messages.value.push(msg)
-    if (msg.parse) focusParse(messages.value.length - 1)
+    pushAnswer(res)
   } catch (e) {
     messages.value.push({
       role: 'ai',
@@ -311,6 +307,64 @@ const ask = async (q) => {
     })
   } finally {
     asking.value = false
+    scrollToBottom()
+  }
+}
+
+// 后端响应 → 对话流消息：clarifyTask/clarifyResolved/missRecorded 均按后端显式字段判断，不做文本嗅探
+const pushAnswer = (res) => {
+  // 语义层答不了（已回流增长回路）→ 增长回路卡；missRecorded 为后端显式标记，不做字符串嗅探
+  const unanswered = res.missRecorded === true
+    || (!res.router && typeof res.answer === 'string' && res.answer.includes('本体完善提案'))
+  // 口径卡回答：结构化内容交给卡片，正文只保留 LLM 自然语言解读，避免与卡片重复
+  const isCard = res.card === 'METRIC' && !!res.metric
+  const msg = {
+    role: 'ai',
+    text: isCard ? res.answerLlm || '' : res.answer,
+    card: res.card,
+    metric: res.metric,
+    router: res.router,
+    intent: res.intent,
+    evidence: res.evidence,
+    links: res.links,
+    unanswered,
+    clarify: res.clarifyTask || null,
+    clarified: res.clarifyResolved === true
+  }
+  // 语义查询 → 组装右侧解析面板（概念/关系/查询逻辑/原始行，全部来自真实结构）
+  if (res.router === 'SEMANTIC') {
+    const sqlEv = (res.evidence || []).find((e) => e.label === '执行SQL')
+    msg.parse = {
+      matchedConcepts: res.matchedConcepts || [],
+      relations: res.relations || [],
+      semantics: res.semantics,
+      sql: sqlEv?.value,
+      rows: res.rows || []
+    }
+  }
+  messages.value.push(msg)
+  if (msg.parse) focusParse(messages.value.length - 1)
+}
+
+// 澄清续跑：q'=原问题+补充重入路由；二轮会返回新的 clarifyTask（原卡换新追问）
+const submitClarify = async (msg) => {
+  const supplement = clarifyInput.value.trim()
+  if (!supplement || clarifying.value || !msg.clarify) return
+  messages.value.push({ role: 'user', text: supplement })
+  clarifyInput.value = ''
+  scrollToBottom()
+  clarifying.value = true
+  try {
+    const res = await answerClarify(msg.clarify.id, supplement)
+    if (res.clarifyRetry === true) {
+      messages.value.push({ role: 'ai', text: '这次补充没有命中答案，任务仍保留——可换个角度补充约束再试，或换个问法直接提问。' })
+    } else {
+      pushAnswer(res)
+    }
+  } catch (e) {
+    messages.value.push({ role: 'ai', text: '补充提交失败：' + (e?.message || '网络异常') + '。任务仍保留，可重新提交。' })
+  } finally {
+    clarifying.value = false
     scrollToBottom()
   }
 }
@@ -641,6 +695,42 @@ const ask = async (q) => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* 澄清卡：A 型歧义可挂起可续跑 */
+.clarify-card {
+  border: 1px solid var(--el-color-primary-light-5, #a0cfff);
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.clarify-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--el-color-primary);
+}
+
+.clarify-q {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.clarify-input {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.clarify-foot {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 /* 输入区 */

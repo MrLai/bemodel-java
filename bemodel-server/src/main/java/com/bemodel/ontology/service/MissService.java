@@ -75,8 +75,8 @@ public class MissService extends ServiceImpl<OntologyMissMapper, OntologyMiss> {
         return Map.of("items", items, "pendingCount", pendingCount);
     }
 
-    /** 待处理 = 未忽略 且（从未采纳 或 采纳已撤销回池） */
-    private boolean isPending(OntologyMiss m) {
+    /** 待处理 = 未忽略 且（从未采纳 或 采纳已撤销回池）。提案生成器选样复用同一口径（public） */
+    public boolean isPending(OntologyMiss m) {
         return !Integer.valueOf(1).equals(m.getDismissed())
                 && (m.getAdoptedConceptCode() == null || Integer.valueOf(1).equals(m.getRevoked()));
     }
@@ -166,6 +166,23 @@ public class MissService extends ServiceImpl<OntologyMissMapper, OntologyMiss> {
         return miss;
     }
 
+    /**
+     * 仅落采纳标记（提案生成器 P1a 用）：概念已由组内首 miss 经 adopt() 创建时，
+     * 同组其余 miss 用此方法挂到同一概念上，不再重复走编码/域校验与建概念。
+     * 与 adopt() 同一套幂等守卫（已采纳且未撤销时报错）。
+     */
+    public OntologyMiss attachAdoption(Long id, String conceptCode) {
+        OntologyMiss miss = requireMiss(id);
+        if (miss.getAdoptedConceptCode() != null && !Integer.valueOf(1).equals(miss.getRevoked())) {
+            throw new BizException("该 miss 已采纳，概念: " + miss.getAdoptedConceptCode());
+        }
+        miss.setAdoptedConceptCode(conceptCode);
+        miss.setAdoptedAs("CONCEPT");
+        miss.setRevoked(0);
+        updateById(miss);
+        return miss;
+    }
+
     /** 撤销采纳：TERM 形态删除本次创建的术语行（术语无下游引用风险，可删）；CONCEPT 形态置 DEPRECATED；不删 miss 数据 */
     public OntologyMiss revoke(Long id) {
         OntologyMiss miss = requireMiss(id);
@@ -180,17 +197,17 @@ public class MissService extends ServiceImpl<OntologyMissMapper, OntologyMiss> {
                     .eq(Term::getSourceProduct, TERM_SOURCE));
         } else {
             Concept concept = conceptService.getByCode(miss.getAdoptedConceptCode());
-            if (concept != null) {
-                // 状态机不允许 DRAFT→DEPRECATED 直达，最短合法路径 DRAFT→REVIEW→PUBLISHED→DEPRECATED
-                while (!"DEPRECATED".equals(concept.getStatus())) {
-                    String next = switch (concept.getStatus()) {
-                        case "DRAFT" -> "REVIEW";
-                        case "REVIEW" -> "PUBLISHED";
-                        case "PUBLISHED" -> "DEPRECATED";
-                        default -> throw new BizException("概念当前状态不可撤销: " + concept.getStatus());
-                    };
-                    concept = conceptService.transition(concept.getCode(), next);
-                }
+            // 状态机已支持 DRAFT/REVIEW→DEPRECATED 直达（维护治理加固 H2）：一次流转到位，
+            // 不再途经瞬态 PUBLISHED（版本不虚增）；已发布概念的废弃仍须评审员/管理员（评审决定，
+            // 撤销即废弃，语义对位），草稿撤销建模员即可。
+            // 共享概念防护（对抗评审）：提案归并采纳后多个 miss 指向同一概念，任一成员撤销
+            // 只解除自身标记；仅当它是最后一个未撤销引用者时才废弃概念，避免把其余成员
+            // 留在「已采纳但概念已废弃」的矛盾态
+            long others = lambdaQuery().eq(OntologyMiss::getAdoptedConceptCode, miss.getAdoptedConceptCode())
+                    .eq(OntologyMiss::getRevoked, 0)
+                    .ne(OntologyMiss::getId, miss.getId()).count();
+            if (others == 0 && concept != null && !"DEPRECATED".equals(concept.getStatus())) {
+                conceptService.transition(concept.getCode(), "DEPRECATED");
             }
         }
         miss.setRevoked(1);
@@ -225,14 +242,13 @@ public class MissService extends ServiceImpl<OntologyMissMapper, OntologyMiss> {
         return suggestion;
     }
 
-    private String buildClassifyPrompt(OntologyMiss miss) {
+    /** 域清单 + 按域分组概念清单：人工归类（classify）与提案生成器（P1a）共用的本体上下文段 */
+    public String buildOntologyContext() {
         List<Domain> domains = domainMapper.selectList(
                 new LambdaQueryWrapper<Domain>().orderByAsc(Domain::getSort));
         List<Concept> concepts = conceptService.listByDomain(null);
         StringBuilder sb = new StringBuilder();
-        sb.append("词表外说法：\"").append(miss.getTerm()).append("\"（类型 ").append(miss.getKind())
-                .append("，来源 ").append(miss.getSource())
-                .append("，累计出现 ").append(miss.getCount()).append(" 次）\n\n可选业务域：\n");
+        sb.append("可选业务域：\n");
         for (Domain d : domains) {
             sb.append("- ").append(d.getCode()).append('(').append(d.getName()).append(')')
                     .append(d.getDescription() == null ? "" : ": " + d.getDescription()).append('\n');
@@ -247,6 +263,15 @@ public class MissService extends ServiceImpl<OntologyMissMapper, OntologyMiss> {
                 sb.append(d.getCode()).append(": ").append(String.join(", ", cs)).append('\n');
             }
         }
+        return sb.toString();
+    }
+
+    private String buildClassifyPrompt(OntologyMiss miss) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("词表外说法：\"").append(miss.getTerm()).append("\"（类型 ").append(miss.getKind())
+                .append("，来源 ").append(miss.getSource())
+                .append("，累计出现 ").append(miss.getCount()).append(" 次）\n\n");
+        sb.append(buildOntologyContext());
         sb.append("\n请为该说法建议一个标准概念，只返回JSON对象：");
         sb.append("{\"code\":\"大写蛇形编码（风格参考 INP_VISIT、FEE_DETAIL）\",\"name\":\"中文名称\",");
         sb.append("\"domainCode\":\"从上面业务域列表中选择的编码\",\"definition\":\"业务定义\",");

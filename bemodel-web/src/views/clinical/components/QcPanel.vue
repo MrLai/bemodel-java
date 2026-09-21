@@ -216,7 +216,7 @@
                   <div class="card-header">
                     <span>LLM 质控意见</span>
                     <el-tag size="small" effect="plain" :type="result.llmUsed ? 'success' : 'info'">
-                      {{ result.llmUsed ? 'deepseek-v4-flash 生成' : '规则模板生成' }}
+                      {{ result.llmUsed ? 'AI 生成' : '规则模板生成' }}
                     </el-tag>
                   </div>
                 </template>

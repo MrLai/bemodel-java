@@ -34,7 +34,11 @@ public class ShaclService {
     }
 
     public Map<String, Object> validatePatient(String inhosNo) {
-        String turtle = rdfService.exportPatient(inhosNo);
+        return validateTurtle(rdfService.exportPatient(inhosNo), inhosNo);
+    }
+
+    /** 纯校验入口：对任意患者 ABox Turtle 跑六 Shape（不依赖数据库，便于单测复用） */
+    public Map<String, Object> validateTurtle(String turtle, String patientId) {
         Model data = ModelFactory.createDefaultModel();
         RDFParser.fromString(turtle).lang(Lang.TURTLE).parse(data.getGraph());
 
@@ -49,7 +53,7 @@ public class ShaclService {
             violations.add(v);
         }
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("patientId", inhosNo);
+        result.put("patientId", patientId);
         result.put("conforms", report.conforms());
         result.put("violations", violations);
         result.put("violationCount", violations.size());

@@ -189,17 +189,8 @@ public class RdfService {
         return sb.toString();
     }
 
-    /** 姓名脱敏：张*三（两字名 张*；单字/空 → *） */
+    /** 姓名脱敏：张*三（两字名 张*；单字/空 → *）——统一实现见 common.Masking */
     static String maskName(String name) {
-        if (name == null || name.isEmpty()) {
-            return "*";
-        }
-        if (name.length() == 1) {
-            return "*";
-        }
-        if (name.length() == 2) {
-            return name.charAt(0) + "*";
-        }
-        return name.charAt(0) + "*" + name.substring(name.length() - 1);
+        return com.bemodel.common.Masking.maskName(name);
     }
 }

@@ -1,6 +1,7 @@
 package com.bemodel.clinical;
 
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.common.PageResult;
 import com.bemodel.datasource.service.DatasourceService;
 import com.bemodel.llm.DeepSeekClient;
@@ -34,11 +35,11 @@ public class QcService {
     public List<Map<String, Object>> records(String keyword) {
         JdbcTemplate emr = datasourceService.jdbc("DS_EMR");
         if (keyword != null && !keyword.isBlank()) {
-            return emr.queryForList(
+            return Masking.maskPatientRows(emr.queryForList(
                     "SELECT * FROM emr_record WHERE patient_name LIKE ? OR inhos_no LIKE ? ORDER BY create_time DESC",
-                    "%" + keyword + "%", "%" + keyword + "%");
+                    "%" + keyword + "%", "%" + keyword + "%"));
         }
-        return emr.queryForList("SELECT * FROM emr_record ORDER BY create_time DESC");
+        return Masking.maskPatientRows(emr.queryForList("SELECT * FROM emr_record ORDER BY create_time DESC"));
     }
 
     /** 病案列表服务端分页（病案会持续累积） */
@@ -55,7 +56,7 @@ public class QcService {
         List<Map<String, Object>> list = emr.queryForList(
                 "SELECT * FROM emr_record " + where + "ORDER BY create_time DESC LIMIT " + pageSize
                         + " OFFSET " + (pageNum - 1) * pageSize, params.toArray());
-        return PageResult.of(list, total == null ? 0 : total, pageNum, pageSize);
+        return PageResult.of(Masking.maskPatientRows(list), total == null ? 0 : total, pageNum, pageSize);
     }
 
     /** 对单份病案执行内涵质控：规则引擎全量校验，发现项持久化并回写病案状态 */
@@ -110,7 +111,7 @@ public class QcService {
         String summary;
         boolean llmUsed = false;
         StringBuilder ctx = new StringBuilder(String.format("病案 %s（患者 %s，%s，主要诊断：%s，全部诊断：%s）内涵质控发现 %d 项问题：\n",
-                recordId, record.get("patient_name"), record.get("record_type"),
+                recordId, Masking.maskName(String.valueOf(record.get("patient_name"))), record.get("record_type"),
                 record.get("diag_main"), record.get("diag_list"), findings.size()));
         for (Map<String, Object> f : findings) {
             ctx.append("- [").append(f.get("ruleCode")).append("] ").append(f.get("evidence")).append('\n');
@@ -162,7 +163,8 @@ public class QcService {
             } else {
                 fail++;
             }
-            details.add(Map.of("recordId", r.get("record_id"), "patient", r.get("patient_name"),
+            details.add(Map.of("recordId", r.get("record_id"), "patient",
+                    Masking.maskName(String.valueOf(r.get("patient_name"))),
                     "pass", one.get("pass"), "findingCount", ((List<?>) one.get("findings")).size()));
         }
         return Map.of("total", all.size(), "pass", pass, "fail", fail, "details", details);

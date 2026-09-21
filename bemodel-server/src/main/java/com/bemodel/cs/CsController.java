@@ -13,6 +13,7 @@ import java.util.Map;
 public class CsController {
 
     private final CsService csService;
+    private final ClarifyService clarifyService;
 
     /** 工单智能诊断（打开即自动完成，返回排查路径/结论/证据/建议/客户话术） */
     @GetMapping("/ticket/{id}/diagnosis")
@@ -31,6 +32,13 @@ public class CsController {
     @PostMapping("/ask")
     public Result<Map<String, Object>> ask(@RequestBody Map<String, String> body) {
         return Result.ok(csService.ask(body.get("question"), body.get("scene")));
+    }
+
+    /** 澄清续跑（D2b）：body {supplement}；q'=原问题+补充重入路由，返回真实答案/二轮澄清卡/兜底菜单 */
+    @PostMapping("/clarify/{id}/answer")
+    public Result<Map<String, Object>> clarifyAnswer(@PathVariable Long id,
+                                                     @RequestBody Map<String, String> body) {
+        return Result.ok(csService.clarifyAnswer(id, body.get("supplement")));
     }
 
     /** 路由反馈（viewer 也可提交；错例回流进路由提示词） */
@@ -52,6 +60,15 @@ public class CsController {
     public Result<PageResult<CsFeedback>> feedbackList(@RequestParam(required = false) Integer pageNum,
                                                        @RequestParam(required = false) Integer pageSize) {
         return Result.ok(csService.feedbackPage(
+                PageResult.pageNum(pageNum), PageResult.pageSize(pageSize, 20)));
+    }
+
+    /** 澄清任务列表（维护者可见性）：PENDING/GAVE_UP/RESOLVED，证据在任务行（原问题+LLM 判断+用户补充） */
+    @GetMapping("/clarify/list")
+    public Result<PageResult<ClarifyTask>> clarifyList(@RequestParam(required = false) String status,
+                                                       @RequestParam(required = false) Integer pageNum,
+                                                       @RequestParam(required = false) Integer pageSize) {
+        return Result.ok(clarifyService.page(status,
                 PageResult.pageNum(pageNum), PageResult.pageSize(pageSize, 20)));
     }
 }

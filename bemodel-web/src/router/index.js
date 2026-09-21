@@ -39,6 +39,12 @@ const routes = [
         meta: { title: '统一口径', subtitle: '统一术语与指标口径 · 一处定义、处处复用' }
       },
       {
+        path: 'trace',
+        name: 'trace',
+        component: () => import('../views/trace/index.vue'),
+        meta: { title: '证据链', subtitle: '每个结论都有链：问题→计划→校验→执行→作答，锚点全部平台内可达' }
+      },
+      {
         path: 'link',
         name: 'link',
         component: () => import('../views/link/index.vue'),
@@ -91,6 +97,18 @@ const routes = [
         name: 'value',
         component: () => import('../views/value/index.vue'),
         meta: { title: '价值实证', subtitle: '对照实验 · 用数据验证平台价值' }
+      },
+      {
+        path: 'lab',
+        name: 'lab',
+        component: () => import('../views/lab/index.vue'),
+        meta: { title: 'AI查询比对', subtitle: '同一个问题三组对比:AI+本体(规则约束) / AI 直接操作数据库 / 人工开发页面,看谁答得可靠' }
+      },
+      {
+        path: 'simulation',
+        name: 'simulation',
+        component: () => import('../views/simulation/index.vue'),
+        meta: { title: '推演沙盘', subtitle: '动手改一个数,沿本体看波及链 · 全程演示数据,不碰真实库' }
       },
       {
         path: 'rca',

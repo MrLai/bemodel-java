@@ -40,10 +40,16 @@ public class SearchService {
     public Map<String, Object> search(String q, boolean recordMiss) {
         String query = q == null ? "" : q.trim();
         List<Map<String, Object>> hits = new ArrayList<>();
+        // 仅废弃概念命中时不回流 miss：词有归宿（已废弃），回流会诱导重建、对抗废弃决定
+        boolean deprecatedMatch = false;
 
         for (Term t : termMapper.selectList(null)) {
             if (nameMatch(query, t.getTerm())) {
                 Concept c = conceptMapper.selectById(conceptIdByCode(t.getConceptCode()));
+                if (c != null && "DEPRECATED".equals(c.getStatus())) {
+                    deprecatedMatch = true;
+                    continue;
+                }
                 hits.add(Map.of("type", "术语", "title", t.getTerm() + "（" + t.getSourceProduct() + "）",
                         "conceptCode", t.getConceptCode(),
                         "content", "标准概念：" + t.getConceptCode()
@@ -52,6 +58,11 @@ public class SearchService {
         }
         for (Concept c : conceptMapper.selectList(null)) {
             if (nameMatch(query, c.getName()) || defMatch(query, c.getDefinition())) {
+                // 废弃概念隔离（维护治理加固 H3）：不再作为口径命中输出，避免废弃口径继续作答
+                if ("DEPRECATED".equals(c.getStatus())) {
+                    deprecatedMatch = true;
+                    continue;
+                }
                 hits.add(Map.of("type", "概念", "title", c.getName() + "（" + c.getCode() + "）",
                         "conceptCode", c.getCode(),
                         "content", c.getDefinition() == null ? "" : c.getDefinition()));
@@ -70,8 +81,9 @@ public class SearchService {
             }
         }
 
-        // 本体增长回路：概念维度零命中才记"词表外说法"——指标/术语命中不算 miss
-        if (hits.isEmpty() && recordMiss) {
+        // 本体增长回路：概念维度零命中才记"词表外说法"——指标/术语命中不算 miss；
+        // 仅废弃概念命中同样不算（词有归宿，只是已下架）
+        if (hits.isEmpty() && recordMiss && !deprecatedMatch) {
             missService.recordMiss(query, "CONCEPT", "SEARCH");
         }
 

@@ -2,6 +2,7 @@ package com.bemodel.rca.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.datasource.service.DatasourceService;
 import com.bemodel.link.entity.LinkNode;
 import com.bemodel.link.service.LinkService;
@@ -70,7 +71,8 @@ public class RcaEngine {
             throw new BizException("客服工单不存在: " + ticketRef);
         }
         String inhosNo = parsePayloadField(ticket.getPayload(), "inhos_no");
-        String patient = parsePayloadField(ticket.getPayload(), "patient");
+        // 姓名出域前打码：后续步骤标题/证据链/LLM 上下文全部沿用打码值，inhos_no 为业务键保留
+        String patient = Masking.maskName(parsePayloadField(ticket.getPayload(), "patient"));
 
         RcaCase rcaCase = new RcaCase();
         rcaCase.setCaseNo("RCA-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss")));
@@ -318,7 +320,7 @@ public class RcaEngine {
         rcaCase.setFinishedAt(LocalDateTime.now());
         caseMapper.updateById(rcaCase);
 
-        saveStep(rcaCase, 7, "产出诊断结论与处置建议（" + (llmUsed ? "deepseek-v4-flash" : "模板降级") + "）",
+        saveStep(rcaCase, 7, "产出诊断结论与处置建议（" + (llmUsed ? deepSeekClient.model() : "模板降级") + "）",
                 "REPORT", null, 1, Map.of("llmUsed", llmUsed, "conclusion", conclusion), start);
     }
 

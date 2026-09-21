@@ -10,9 +10,13 @@ import com.bemodel.modeling.service.ActionService;
 import com.bemodel.modeling.service.ReleaseService;
 import com.bemodel.modeling.service.RuleService;
 import com.bemodel.search.SearchService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.util.List;
 import java.util.Map;
@@ -37,6 +41,17 @@ class ModelingElementsTest {
     private SearchService searchService;
     @Autowired
     private LlmLogService llmLogService;
+
+    @AfterEach
+    void clearAuth() {
+        SecurityContextHolder.clearContext();
+    }
+
+    /** 发布审批门禁（P0②）用：以指定角色构造认证主体 */
+    private static void loginAs(String role) {
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
+                "tester", "n/a", List.of(new SimpleGrantedAuthority("ROLE_" + role))));
+    }
 
     @Test
     void rulesAndActionsSeeded() {
@@ -72,8 +87,9 @@ class ModelingElementsTest {
 
     @Test
     void releasePublishShouldSnapshotPublishedElements() {
+        loginAs("ADMIN"); // 发布审批门禁（V29/P0②）：需评审员或管理员
         String before = releaseService.currentTag();
-        Release release = releaseService.publish("测试发布", "自动化测试");
+        Release release = releaseService.publish("测试发布", "自动化测试", true); // force：跳过覆盖类 WARN（门禁单测另证）
         assertNotNull(release.getVersionTag());
         if (before == null) {
             assertEquals("v1.0", release.getVersionTag());

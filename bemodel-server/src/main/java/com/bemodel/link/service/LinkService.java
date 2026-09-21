@@ -2,6 +2,7 @@ package com.bemodel.link.service;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.common.PageResult;
 import com.bemodel.datasource.service.DatasourceService;
 import com.bemodel.link.entity.LinkNode;
@@ -200,13 +201,14 @@ public class LinkService extends ServiceImpl<LinkNodeMapper, LinkNode> {
             ticket.setNodeType("TICKET");
             ticket.setRefNo("T-AUTO-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"))
                     + "-" + String.format("%03d", ++seq));
-            ticket.setTitle("系统预警：患者" + b.get("patient_name") + "存在" + b.get("cnt") + "笔取消未退费费用");
+            ticket.setTitle("系统预警：患者" + Masking.maskName(String.valueOf(b.get("patient_name")))
+                    + "存在" + b.get("cnt") + "笔取消未退费费用");
             ticket.setConceptCode("FEE_DETAIL");
             ticket.setStatus("待处理");
             ticket.setOccurredAt(LocalDateTime.now());
             ticket.setPayload(String.format(
                     "{\"patient\":\"%s\",\"inhos_no\":\"%s\",\"fee_count\":%s,\"amount\":%s,\"source\":\"指标监控自动检测（取消未退费笔数告警）\"}",
-                    b.get("patient_name"), inhosNo, b.get("cnt"), b.get("amt")));
+                    Masking.maskName(String.valueOf(b.get("patient_name"))), inhosNo, b.get("cnt"), b.get("amt")));
             save(ticket);
             created.add(Map.of("refNo", ticket.getRefNo(), "title", ticket.getTitle()));
         }

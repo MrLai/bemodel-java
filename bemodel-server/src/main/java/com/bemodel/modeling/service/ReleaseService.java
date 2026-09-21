@@ -2,6 +2,7 @@ package com.bemodel.modeling.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.bemodel.auth.CurrentUser;
 import com.bemodel.common.BizException;
 import com.bemodel.modeling.entity.Action;
 import com.bemodel.modeling.entity.Release;
@@ -27,6 +28,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -70,6 +72,10 @@ public class ReleaseService extends ServiceImpl<ReleaseMapper, Release> {
      */
     @Transactional
     public Release publish(String changeSummary, String releasedBy, boolean force) {
+        // 评审门禁（P0②）：本体版本发布须评审员或管理员审批
+        if (!CurrentUser.hasAnyRole("REVIEWER", "ADMIN")) {
+            throw new BizException("本体版本发布需评审员（REVIEWER）或管理员（ADMIN）审批");
+        }
         List<OntologyCheckService.Defect> defects = ontologyCheckService.check();
         List<OntologyCheckService.Defect> blockers = ontologyCheckService.blockers(defects);
         if (!blockers.isEmpty()) {
@@ -112,6 +118,9 @@ public class ReleaseService extends ServiceImpl<ReleaseMapper, Release> {
                     + terms.size() + metrics.size() + rules.size() + actions.size());
             release.setSnapshotJson(objectMapper.writeValueAsString(snapshot));
             release.setReleasedBy(releasedBy);
+            // 审批留痕（V29）：谁批准了这版口径，与 releasedBy 区分
+            release.setApprovedBy(CurrentUser.username());
+            release.setApprovedAt(LocalDateTime.now());
             save(release);
             return release;
         } catch (Exception e) {
@@ -126,20 +135,18 @@ public class ReleaseService extends ServiceImpl<ReleaseMapper, Release> {
         return latest == null ? null : latest.getVersionTag();
     }
 
-    /**
-     * 传递闭包重建：对每个 is_transitive=1 的关系名，全源 BFS 算传递可达（最短跳数），
-     * 先删后插重建该关系的全部闭包行。深度超 CLOSURE_MAX_DEPTH 截断并报告 capped。
-     * 返回每个关系名的统计 {edges, derived, capped}，随快照落库。
-     */
-    private Map<String, Object> rebuildRelationClosures() {
-        List<Relation> all = relationMapper.selectList(null);
+    /** 闭包 BFS 纯计算（golden 直测，零 IO）：depths=关系名→源→(可达概念→最短跳数)；cappedNames=超深截断的关系名 */
+    record ClosureDepth(Map<String, Map<String, Map<String, Integer>>> depths, Set<String> cappedNames) {}
+
+    static ClosureDepth closureBfs(List<Relation> all, int maxDepth) {
         Set<String> transitiveNames = new TreeSet<>();
         for (Relation r : all) {
             if (r.getIsTransitive() != null && r.getIsTransitive() == 1) {
                 transitiveNames.add(r.getRelationName());
             }
         }
-        Map<String, Object> stats = new LinkedHashMap<>();
+        Map<String, Map<String, Map<String, Integer>>> depths = new LinkedHashMap<>();
+        Set<String> cappedNames = new TreeSet<>();
         for (String name : transitiveNames) {
             Map<String, List<String>> adj = new LinkedHashMap<>();
             Set<String> sources = new TreeSet<>();
@@ -149,12 +156,10 @@ public class ReleaseService extends ServiceImpl<ReleaseMapper, Release> {
                     sources.add(r.getFromConcept());
                 }
             }
-            relationClosureMapper.delete(new LambdaQueryWrapper<RelationClosure>()
-                    .eq(RelationClosure::getRelationName, name));
-            int derived = 0;
+            Map<String, Map<String, Integer>> bySource = new LinkedHashMap<>();
             boolean capped = false;
             for (String source : sources) {
-                // 单源 BFS：to → 最短跳数
+                // 单源 BFS：to → 最短跳数（与抽取前逐字同源）
                 Map<String, Integer> depthOf = new LinkedHashMap<>();
                 Deque<String> queue = new ArrayDeque<>();
                 for (String first : adj.getOrDefault(source, List.of())) {
@@ -165,7 +170,7 @@ public class ReleaseService extends ServiceImpl<ReleaseMapper, Release> {
                 while (!queue.isEmpty()) {
                     String cur = queue.poll();
                     int d = depthOf.get(cur);
-                    if (d >= CLOSURE_MAX_DEPTH) {
+                    if (d >= maxDepth) {
                         if (!adj.getOrDefault(cur, List.of()).isEmpty()) {
                             capped = true; // 深度上限截断，显式报告
                         }
@@ -177,18 +182,42 @@ public class ReleaseService extends ServiceImpl<ReleaseMapper, Release> {
                         }
                     }
                 }
-                for (Map.Entry<String, Integer> e : depthOf.entrySet()) {
+                bySource.put(source, depthOf);
+            }
+            depths.put(name, bySource);
+            if (capped) {
+                cappedNames.add(name);
+            }
+        }
+        return new ClosureDepth(depths, cappedNames);
+    }
+
+    /**
+     * 传递闭包重建：对每个 is_transitive=1 的关系名，先删后插重建全部闭包行（BFS 见 closureBfs）。
+     * 返回每个关系名的统计 {edges, derived, capped}，随快照落库。
+     */
+    private Map<String, Object> rebuildRelationClosures() {
+        List<Relation> all = relationMapper.selectList(null);
+        ClosureDepth cd = closureBfs(all, CLOSURE_MAX_DEPTH);
+        Map<String, Object> stats = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Map<String, Integer>>> entry : cd.depths().entrySet()) {
+            String name = entry.getKey();
+            relationClosureMapper.delete(new LambdaQueryWrapper<RelationClosure>()
+                    .eq(RelationClosure::getRelationName, name));
+            int derived = 0;
+            for (Map.Entry<String, Map<String, Integer>> sourceEntry : entry.getValue().entrySet()) {
+                for (Map.Entry<String, Integer> e : sourceEntry.getValue().entrySet()) {
                     RelationClosure rc = new RelationClosure();
                     rc.setRelationName(name);
-                    rc.setFromConcept(source);
+                    rc.setFromConcept(sourceEntry.getKey());
                     rc.setToConcept(e.getKey());
                     rc.setDepth(e.getValue());
                     relationClosureMapper.insert(rc);
                     derived++;
                 }
             }
-            stats.put(name, Map.of("edges", adj.values().stream().mapToInt(List::size).sum(),
-                    "derived", derived, "capped", capped));
+            stats.put(name, Map.of("edges", all.stream().filter(r -> name.equals(r.getRelationName())).count(),
+                    "derived", derived, "capped", cd.cappedNames().contains(name)));
         }
         return stats;
     }

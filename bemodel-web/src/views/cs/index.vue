@@ -97,6 +97,19 @@
       </template>
     </el-dialog>
 
+    <!-- 跨库核对差异登记（/cs?recon=<runId> 深链落地；数据来自 GET /api/recon/diffs） -->
+    <el-dialog v-model="reconDialogVisible" title="本批次差异登记（跨库核对）" width="880px">
+      <el-table :data="reconDiffs" size="small" max-height="480">
+        <el-table-column prop="direction" label="方向" width="64" />
+        <el-table-column prop="stateCode" label="语义档" width="216" />
+        <el-table-column prop="severity" label="严重级" width="92" />
+        <el-table-column prop="patientNo" label="患者号" width="130" />
+        <el-table-column prop="orderId" label="业务单号" width="170" />
+        <el-table-column prop="itemName" label="项目" min-width="120" />
+        <el-table-column prop="suggestedAction" label="建议动作" min-width="160" />
+      </el-table>
+    </el-dialog>
+
     <el-row :gutter="16" style="margin-top: 16px">
       <!-- 左栏：客服工单 -->
       <el-col :span="7">
@@ -355,7 +368,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listTickets, ticketDiagnosis, refundTicket, askCs, submitCsFeedback } from '../../api/cs'
+import { listTickets, ticketDiagnosis, refundTicket, askCs, submitCsFeedback, fetchReconDiffs } from '../../api/cs'
 
 const route = useRoute()
 const router = useRouter()
@@ -581,10 +594,25 @@ const stepTypeText = (t) =>
 const stepTypeTag = (t) =>
   ({ TRAVERSE: 'primary', PROBE: 'warning', LINK: 'success', REPORT: 'danger' }[t] || 'info')
 
+// ---------- 差异登记深链（/cs?recon=<runId>，来自核对答案「查本批次差异登记」锚点） ----------
+const reconDialogVisible = ref(false)
+const reconDiffs = ref([])
+const showRecon = async (runId) => {
+  try {
+    reconDiffs.value = await fetchReconDiffs(runId)
+    reconDialogVisible.value = true
+  } catch (e) {
+    ElMessage.error('差异登记读取失败：' + (e?.message || '网络异常'))
+  }
+}
+
 onMounted(async () => {
   // 承接智能问数页「业务咨询？去 AI 客服」转介深链：带原问题直接提问
   const q0 = route.query.q
   if (q0) doAsk(String(q0))
+  // 承接核对答案「查本批次差异登记」锚点：按 runId 拉差异登记
+  const recon0 = route.query.recon
+  if (recon0) showRecon(String(recon0))
   await loadTickets()
   const ticketId = Number(route.query.ticketId)
   if (ticketId) {

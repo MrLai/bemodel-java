@@ -20,7 +20,7 @@
           <template #title>
             <div class="answer-title">
               <span>{{ answer }}</span>
-              <el-tag size="small" effect="plain" type="success">deepseek-v4-flash</el-tag>
+              <el-tag size="small" effect="plain" type="success">AI 生成</el-tag>
             </div>
           </template>
         </el-alert>

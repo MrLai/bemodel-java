@@ -20,5 +20,9 @@ public class Mapping {
     private String valueMap;
     private Integer confirmed;
     private String source;
+    /** 生命周期（V30）: PROPOSED/ACTIVE/DEPRECATED */
+    private String status;
+    private String updatedBy;
+    private LocalDateTime updatedAt;
     private LocalDateTime createdAt;
 }

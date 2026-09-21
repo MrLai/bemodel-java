@@ -52,7 +52,7 @@ public class ArchitectureService {
         List<Concept> concepts = conceptService.list();
         List<Relation> relations = relationService.list();
         List<Datasource> datasources = datasourceService.listAll();
-        List<Mapping> mappings = mappingService.list();
+        List<Mapping> mappings = mappingService.activeList(); // 架构总览覆盖度只算生效映射（V30）
         List<Rule> rules = ruleService.list();
         List<Metric> metrics = metricService.list();
 
@@ -100,9 +100,15 @@ public class ArchitectureService {
         for (Concept c : concepts) {
             addEdge(edges, edgeIds, nodeIds, "BELONG", "D:" + c.getDomainCode(), "C:" + c.getCode(), null);
         }
+        // RELATION 边：同 (from,to) 折叠为一条（spec §5），公理随边透出（spec §4）
+        Map<String, List<Relation>> relationsByPair = new LinkedHashMap<>();
         for (Relation r : relations) {
-            addEdge(edges, edgeIds, nodeIds, "RELATION",
-                    "C:" + r.getFromConcept(), "C:" + r.getToConcept(), r.getRelationName());
+            relationsByPair.computeIfAbsent(r.getFromConcept() + "->" + r.getToConcept(),
+                    k -> new ArrayList<>()).add(r);
+        }
+        for (Map.Entry<String, List<Relation>> en : relationsByPair.entrySet()) {
+            String[] pair = en.getKey().split("->", 2);
+            addRelationEdge(edges, edgeIds, nodeIds, "C:" + pair[0], "C:" + pair[1], en.getValue());
         }
         // 映射按 概念→物理表 去重（一表多列只画一条边）
         Set<String> seenMapping = new LinkedHashSet<>();
@@ -173,6 +179,59 @@ public class ArchitectureService {
             edge.put("label", label);
         }
         edge.put("kind", kind);
+        edges.add(edge);
+    }
+
+    /** axiom canonical 顺序（与前端 axiomEdge.js AXIOM_ORDER 一致，golden 断言依赖此序） */
+    private static final List<String> AXIOM_ORDER =
+            List.of("symmetric", "transitive", "functional", "inverseFunctional", "asymmetric");
+
+    private static boolean flagOn(Integer v) {
+        return v != null && v == 1;
+    }
+
+    /** 同 (from,to) 成员折叠为一条 RELATION 边（spec §5；前端镜像=bemodel-web/src/utils/axiomEdge.js foldRelations，两处改动必须同步）：
+     * label 排序「/」连接超 3 截断，axioms 并集 */
+    private void addRelationEdge(List<Map<String, Object>> edges, Set<String> edgeIds, Set<String> nodeIds,
+                                 String source, String target, List<Relation> members) {
+        List<Relation> sorted = members.stream()
+                .sorted(Comparator.comparing(Relation::getRelationName)).toList();
+        List<String> names = sorted.stream().map(Relation::getRelationName).toList();
+        String label = names.size() <= 3
+                ? String.join("/", names)
+                : String.join("/", names.subList(0, 3)) + "+" + (names.size() - 3);
+        Set<String> axioms = new LinkedHashSet<>();
+        String inverseOf = null;
+        for (Relation r : sorted) {
+            if (flagOn(r.getIsSymmetric())) axioms.add("symmetric");
+            if (flagOn(r.getIsTransitive())) axioms.add("transitive");
+            if (flagOn(r.getIsFunctional())) axioms.add("functional");
+            if (flagOn(r.getIsInverseFunctional())) axioms.add("inverseFunctional");
+            if (flagOn(r.getIsAsymmetric())) axioms.add("asymmetric");
+            if (inverseOf == null && r.getInverseOf() != null && !r.getInverseOf().isBlank()) {
+                inverseOf = r.getInverseOf();
+            }
+        }
+        List<String> ordered = AXIOM_ORDER.stream().filter(axioms::contains).toList();
+        if (!nodeIds.contains(source) || !nodeIds.contains(target)) {
+            return; // dangling 引用不出边
+        }
+        String id = "RELATION" + "|" + source + "->" + target + "|" + label;
+        if (!edgeIds.add(id)) {
+            return;
+        }
+        Map<String, Object> edge = new LinkedHashMap<>();
+        edge.put("id", id);
+        edge.put("source", source);
+        edge.put("target", target);
+        edge.put("label", label);
+        edge.put("kind", "RELATION");
+        if (!ordered.isEmpty()) {
+            edge.put("axioms", ordered);
+        }
+        if (inverseOf != null) {
+            edge.put("inverseOf", inverseOf);
+        }
         edges.add(edge);
     }
 }

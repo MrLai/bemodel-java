@@ -2,11 +2,14 @@ package com.bemodel.cs;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.datasource.entity.Mapping;
 import com.bemodel.datasource.entity.PhysicalTable;
 import com.bemodel.datasource.mapper.MappingMapper;
 import com.bemodel.datasource.mapper.PhysicalTableMapper;
 import com.bemodel.datasource.service.DatasourceService;
+import com.bemodel.cs.QaTrace;
+import com.bemodel.cs.mapper.QaTraceMapper;
 import com.bemodel.llm.DeepSeekClient;
 import com.bemodel.ontology.entity.Attribute;
 import com.bemodel.ontology.entity.Concept;
@@ -53,14 +56,23 @@ public class SemanticQaService {
     private final DeepSeekClient deepSeekClient;
     private final ObjectMapper objectMapper;
     private final MissService missService;
+    private final QaTraceMapper qaTraceMapper;
 
     /** 查询计划：LLM 产出的结构化意图（QUERY 查数 / MODEL_ANSWER 模型规则判断 / UNANSWERABLE） */
     record Plan(String mode, String ds, String sql, String semantics, String reason,
-                String conclusion, String verifySql) {
+                String conclusion, String verifySql, String gapType) {
     }
 
-    /** 问答结果：result 为 null 表示降级落能力菜单；recordedMiss 标记本次是否已回流增长回路 */
-    public record Outcome(Map<String, Object> result, boolean recordedMiss) {
+    /**
+     * 问答结果：result 为 null 表示降级落能力菜单；recordedMiss 标记本次是否已回流增长回路；
+     * gapType/reason 仅 UNANSWERABLE 且 LLM 分型为 A 型歧义（AMBIGUITY）时非空——
+     * 该次不记 miss（歧义尚未定性），由调用方决定建澄清任务还是（续跑封顶后）回流。
+     */
+    public record Outcome(Map<String, Object> result, boolean recordedMiss, String gapType, String reason) {
+        /** 兼容既有调用：非澄清路径的Outcome */
+        public Outcome(Map<String, Object> result, boolean recordedMiss) {
+            this(result, recordedMiss, null, null);
+        }
     }
 
     /**
@@ -79,6 +91,10 @@ public class SemanticQaService {
             return new Outcome(null, false);
         }
         if ("UNANSWERABLE".equals(plan.mode())) {
+            if (analytics && "AMBIGUITY".equals(plan.gapType())) {
+                // A 型歧义：不记 miss（问题可能被答出，尚未定性为缺口），由调用方建澄清任务续跑
+                return new Outcome(null, false, "AMBIGUITY", plan.reason());
+            }
             recordQuestionMiss(q, analytics);
             return new Outcome(null, true);
         }
@@ -103,6 +119,7 @@ public class SemanticQaService {
             return new Outcome(null, true);
         }
         List<Map<String, Object>> rows;
+        long start = System.currentTimeMillis();
         try {
             // 不污染共享 JdbcTemplate：基于同一 DataSource 包一层带超时/行数上限的执行器
             JdbcTemplate jdbc = new JdbcTemplate(datasourceService.jdbc(plan.ds()).getDataSource());
@@ -114,10 +131,14 @@ public class SemanticQaService {
             recordQuestionMiss(q, analytics);
             return new Outcome(null, true);
         }
+        long execMs = System.currentTimeMillis() - start;
         int total = rows.size();
-        List<Map<String, Object>> view = rows.size() > 20 ? rows.subList(0, 20) : rows;
-        String answer = composeAnswer(q, plan, sql, view, total).orElseGet(
-                () -> templateAnswer(plan, total, view));
+        // 展示行与 LLM 出域上下文同源：先脱敏再共用（rows 本身不再返回）
+        List<Map<String, Object>> view = Masking.maskPatientRows(rows.size() > 20 ? rows.subList(0, 20) : rows);
+        java.util.Optional<String> llmAnswer = composeAnswer(q, plan, sql, view, total);
+        String answer = llmAnswer.orElseGet(() -> templateAnswer(plan, total, view));
+        // 诚实标注作答来源（LLM/模板）——证据链必答「这个结论谁产的」
+        String answerSource = llmAnswer.isPresent() ? "LLM" : "TEMPLATE";
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("question", q);
@@ -131,11 +152,19 @@ public class SemanticQaService {
                 Map.of("label", "执行SQL", "value", sql),
                 Map.of("label", "数据源", "value", plan.ds() + " / " + String.join(",", usedTables)),
                 Map.of("label", "结果行数", "value", total + (total > 20 ? "（展示前20行）" : ""))));
-        result.put("links", conceptLinks(plan.ds(), usedTables));
         // 结构化解析（智能问数侧栏）：概念匹配/关系链来自本体真实结构，行数据来自真实查询，不编造置信度
         result.put("semantics", plan.semantics());
         result.put("rows", view);
         fillParse(result, q + " " + plan.semantics());
+        // D3 证据链落库：问题→计划→校验→执行→作答 五段证据持久化（/trace 页逐段还原，锚点全平台内可达）
+        String traceId = persistQaTrace(analytics, q, plan, sql, usedTables,
+                conceptCodes(result.get("matchedConcepts")), total, answer, answerSource, (int) execMs);
+        List<Map<String, String>> links = new ArrayList<>(conceptLinks(plan.ds(), usedTables));
+        if (traceId != null) {
+            result.put("traceId", traceId);
+            links.add(Map.of("label", "查证据链", "route", "/trace?type=QA&key=" + traceId));
+        }
+        result.put("links", links);
         return new Outcome(result, false);
     }
 
@@ -206,6 +235,55 @@ public class SemanticQaService {
         missService.recordMiss(q, "QUESTION", analytics ? "QA_ASK" : "CS_ASK");
     }
 
+    /** D3：语义查询成功路径的证据链落库（仅 QUERY 成功记；落库失败静默降级，不影响主回答） */
+    private String persistQaTrace(boolean analytics, String q, Plan plan, String sql, List<String> usedTables,
+                                  String matchedConcepts, int total, String answer, String answerSource, int durationMs) {
+        try {
+            String traceId = "QA-" + java.time.LocalDateTime.now()
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
+                    + "-" + java.util.UUID.randomUUID().toString().substring(0, 6);
+            QaTrace t = new QaTrace();
+            t.setTraceId(traceId);
+            t.setScene(analytics ? "ANALYTICS" : "CS");
+            t.setQuestion(q.length() > 512 ? q.substring(0, 512) : q);
+            t.setDsCode(plan.ds());
+            t.setUsedTables(truncate(String.join(",", usedTables), 256));
+            t.setSqlText(truncate(sql, 1024));
+            t.setSemantics(truncate(plan.semantics(), 512));
+            t.setMatchedConcepts(truncate(matchedConcepts, 256));
+            t.setRowCount(total);
+            t.setAnswer(answer);
+            t.setAnswerSource(answerSource);
+            t.setDurationMs(durationMs);
+            t.setCreatedAt(java.time.LocalDateTime.now());
+            qaTraceMapper.insert(t);
+            return traceId;
+        } catch (Exception e) {
+            log.warn("问数证据链落库失败（静默降级，不影响主回答）: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** fillParse 产物提取命中概念 code（逗号分隔，证据链锚点用），去重限 16 个 */
+    private static String conceptCodes(Object matched) {
+        if (!(matched instanceof List<?> list)) {
+            return "";
+        }
+        return list.stream()
+                .filter(m -> m instanceof Map<?, ?> mp && mp.get("code") != null)
+                .map(m -> String.valueOf(((Map<?, ?>) m).get("code")))
+                .distinct()
+                .limit(16)
+                .collect(java.util.stream.Collectors.joining(","));
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
     /**
      * 模型作答：「可不可以/能不能」类业务规则问题，从本体结构推理结论，
      * verifySql 探针可选——校验或执行失败只丢探针，保留结构结论。
@@ -261,7 +339,7 @@ public class SemanticQaService {
         String probeText;
         try {
             probeText = probeSql == null ? "无（纯结构判断）"
-                    : probeSql + " → " + objectMapper.writeValueAsString(probeRows);
+                    : probeSql + " → " + objectMapper.writeValueAsString(Masking.maskPatientRows(probeRows));
         } catch (Exception e) {
             probeText = "无（纯结构判断）";
         }
@@ -299,7 +377,7 @@ public class SemanticQaService {
         tables.forEach(t -> tableComment.put(t.getDsCode() + "." + t.getTableName(),
                 t.getTableComment() == null ? "" : t.getTableComment()));
         List<Mapping> mappings = mappingMapper.selectList(
-                new LambdaQueryWrapper<Mapping>().eq(Mapping::getConfirmed, 1));
+                new LambdaQueryWrapper<Mapping>().eq(Mapping::getStatus, "ACTIVE")); // 生命周期（V30）：仅生效映射进语义上下文
         Map<String, Map<String, List<Mapping>>> byDsTable = new TreeMap<>();
         for (Mapping m : mappings) {
             byDsTable.computeIfAbsent(m.getDsCode(), k -> new TreeMap<>())
@@ -359,7 +437,7 @@ public class SemanticQaService {
             String mode = node.path("mode").asText("");
             if ("UNANSWERABLE".equals(mode)) {
                 log.info("语义查询不可答: {}", node.path("reason").asText(""));
-                return new Plan(mode, null, null, null, node.path("reason").asText(""), null, null);
+                return new Plan(mode, null, null, null, node.path("reason").asText(""), null, null, gapType(node));
             }
             if ("MODEL_ANSWER".equals(mode)) {
                 String conclusion = node.path("conclusion").asText("").trim();
@@ -368,7 +446,7 @@ public class SemanticQaService {
                 }
                 return new Plan(mode, node.path("ds").asText("").trim(),
                         null, node.path("semantics").asText(""), null,
-                        conclusion, node.path("verifySql").asText("").trim());
+                        conclusion, node.path("verifySql").asText("").trim(), null);
             }
             if (!"QUERY".equals(mode)) {
                 return null;
@@ -378,11 +456,20 @@ public class SemanticQaService {
             if (ds.isEmpty() || sql.isEmpty()) {
                 return null;
             }
-            return new Plan(mode, ds, sql, node.path("semantics").asText(""), null, null, null);
+            return new Plan(mode, ds, sql, node.path("semantics").asText(""), null, null, null, null);
         } catch (Exception e) {
             log.warn("语义查询计划解析失败（降级）: {}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 缺口分型（D2b）：取计划阶段 LLM 结构化输出的 gapType，不在事后对 reason 做关键词嗅探。
+     * 降级规则：未输出/值非法 → 一律按 VOCABULARY（= 现状行为，回流 bm_ontology_miss）。
+     */
+    static String gapType(JsonNode node) {
+        String g = node.path("gapType").asText("").trim().toUpperCase();
+        return "AMBIGUITY".equals(g) || "VOCABULARY".equals(g) ? g : "VOCABULARY";
     }
 
     private String buildPlanPrompt(String q) {
@@ -405,7 +492,8 @@ public class SemanticQaService {
                 + "\"semantics\":\"SETTLEMENT(结算记录)按 inhos_no 维系：一张结算单对应一个患者的一次住院\","
                 + "\"conclusion\":\"不可以。结算单按单个患者的单次住院维系，不支持跨患者合并结算\","
                 + "\"verifySql\":\"SELECT COUNT(*) AS cnt, COUNT(DISTINCT inhos_no) AS patients FROM settlement\"}\n"
-                + "8. 语义层确实回答不了时返回 {\"mode\":\"UNANSWERABLE\",\"reason\":\"一句话原因\"}。\n"
+                + "8. 语义层确实回答不了时返回 {\"mode\":\"UNANSWERABLE\",\"reason\":\"一句话原因\","
+                + "\"gapType\":\"AMBIGUITY 问题歧义（口径/时间范围/统计对象不明，追问用户可解） 或 VOCABULARY 本体无此概念\"}。\n"
                 + "\n用户问题：" + q + "\n"
                 + "只输出JSON：{\"mode\":\"QUERY\",\"ds\":\"数据源编码\",\"sql\":\"SELECT ...\",\"semantics\":\"一句话说明查了什么、用了哪些概念\"}";
     }
@@ -660,7 +748,8 @@ public class SemanticQaService {
             return List.of();
         }
         List<Mapping> mappings = mappingMapper.selectList(new LambdaQueryWrapper<Mapping>()
-                .eq(Mapping::getDsCode, ds).in(Mapping::getTableName, usedTables));
+                .eq(Mapping::getDsCode, ds).eq(Mapping::getStatus, "ACTIVE")
+                .in(Mapping::getTableName, usedTables));
         List<String> codes = mappings.stream().map(Mapping::getConceptCode).distinct().limit(2).toList();
         List<Map<String, String>> links = new ArrayList<>();
         for (String code : codes) {
@@ -691,13 +780,13 @@ public class SemanticQaService {
 
     private Set<String> allowedTables(String ds) {
         return new LinkedHashSet<>(mappingMapper.selectList(new LambdaQueryWrapper<Mapping>()
-                        .eq(Mapping::getDsCode, ds).eq(Mapping::getConfirmed, 1))
+                        .eq(Mapping::getDsCode, ds).eq(Mapping::getStatus, "ACTIVE"))
                 .stream().map(Mapping::getTableName).toList());
     }
 
     private Set<String> allowedColumns(String ds) {
         return new LinkedHashSet<>(mappingMapper.selectList(new LambdaQueryWrapper<Mapping>()
-                        .eq(Mapping::getDsCode, ds).eq(Mapping::getConfirmed, 1))
+                        .eq(Mapping::getDsCode, ds).eq(Mapping::getStatus, "ACTIVE"))
                 .stream().map(Mapping::getColumnName).toList());
     }
 }

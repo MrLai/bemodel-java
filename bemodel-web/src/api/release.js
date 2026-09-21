@@ -14,3 +14,6 @@ export const listLlmLogs = (pageNum = 1, pageSize = 20) =>
   request.get('/llm/log/list', { params: { pageNum, pageSize } })
 
 export const llmStats = () => request.get('/llm/stats')
+
+// ---------- LLM 主备路由健康（借鉴 4） ----------
+export const getLlmRoutes = () => request.get('/llm/routes')

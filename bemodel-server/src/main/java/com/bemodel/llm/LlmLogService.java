@@ -22,11 +22,13 @@ public class LlmLogService {
     private final LlmLogMapper llmLogMapper;
     private final ReleaseService releaseService;
 
-    public void log(String callType, String model, String promptDigest,
+    /** 每次尝试一行（借鉴 4）：provider 区分主备路（"primary"|"backup"）；无 Key 行同走此入口 */
+    public void log(String callType, String model, String provider, String promptDigest,
                     long latencyMs, boolean success, String errMsg) {
         try {
             LlmLog entry = new LlmLog();
             entry.setCallType(callType);
+            entry.setProvider(provider == null || provider.isBlank() ? "primary" : provider);
             entry.setModel(model);
             String tag = releaseService.currentTag();
             entry.setOntologyVersion(tag == null ? "未发布" : tag);

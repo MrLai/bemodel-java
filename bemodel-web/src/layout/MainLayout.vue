@@ -35,6 +35,10 @@
             <el-icon><Share /></el-icon>
             <span>链路追溯</span>
           </el-menu-item>
+          <el-menu-item index="/trace">
+            <el-icon><Connection /></el-icon>
+            <span>证据链</span>
+          </el-menu-item>
           <el-menu-item index="/gov">
             <el-icon><Stamp /></el-icon>
             <span>数据治理</span>
@@ -57,6 +61,10 @@
           <el-menu-item index="/value">
             <el-icon><DataAnalysis /></el-icon>
             <span>价值实证</span>
+          </el-menu-item>
+          <el-menu-item index="/lab">
+            <el-icon><DataAnalysis /></el-icon>
+            <span>AI查询比对</span>
           </el-menu-item>
         </el-menu-item-group>
         <el-menu-item-group>
@@ -111,7 +119,7 @@
           >
             <el-icon class="bell-icon" :size="18" @click="openNoticeDrawer"><Bell /></el-icon>
           </el-badge>
-          <el-tag type="success" effect="plain">DeepSeek: deepseek-v4-flash</el-tag>
+          <el-tag :type="llmTagType" effect="plain">{{ llmTagText }}</el-tag>
           <el-dropdown @command="onUserCommand">
             <span class="user-info">
               <span class="bm-avatar">{{ avatarText }}</span>
@@ -200,6 +208,7 @@ import { ElMessage } from 'element-plus'
 import { Platform, Collection, Connection, Notebook, ChatDotRound, Share, Tickets, FirstAidKit, Stamp, Service, DataAnalysis, Opportunity, Aim, ArrowDown, Bell } from '@element-plus/icons-vue'
 import { useUserStore } from '../store/user'
 import { version as appVersion } from '../../package.json'
+import { getLlmRoutes } from '../api/release'
 import { listOntologyMisses } from '../api/ontology'
 import {
   unreadNoticeCount,
@@ -288,6 +297,22 @@ const doInspect = async () => {
 // ---------- 概念缺口角标（本体增长回路待处理数） ----------
 const pendingMissCount = ref(0)
 
+// ---------- LLM 主备健康（借鉴 4）：读 /api/llm/routes 说真话，接口不可达静默兜底 ----------
+const llmTagText = ref('AI 提供方检测中…')
+const llmTagType = ref('info')
+const loadLlmRoutes = async () => {
+  try {
+    const data = await getLlmRoutes()
+    const routes = Array.isArray(data) ? data : []
+    if (!routes.length) return
+    const primary = routes.find((r) => r.name === 'primary')
+    const backup = routes.find((r) => r.name === 'backup')
+    const mark = (r) => (r && r.healthy ? '正常' : '未接通')
+    llmTagText.value = `AI: ${primary?.model || '状态未知'}（主${mark(primary)}${backup ? `，备${mark(backup)}` : ''}）`
+    llmTagType.value = primary && primary.healthy === false ? 'danger' : 'success'
+  } catch (_) { /* 保留兜底文案，不弹错 */ }
+}
+
 const loadMissCount = async () => {
   try {
     const res = await listOntologyMisses()
@@ -297,19 +322,22 @@ const loadMissCount = async () => {
   }
 }
 
-// 60s 轮询未读数 + 概念缺口数 + 页面重新激活时刷新
+// 60s 轮询未读数 + 概念缺口数 + LLM 主备健康 + 页面重新激活时刷新
 let pollTimer = null
 const onVisible = () => {
   if (!document.hidden) {
+    loadLlmRoutes()
     loadUnreadCount()
     loadMissCount()
   }
 }
 
 onMounted(() => {
+  loadLlmRoutes()
   loadUnreadCount()
   loadMissCount()
   pollTimer = setInterval(() => {
+    loadLlmRoutes()
     loadUnreadCount()
     loadMissCount()
   }, 60000)

@@ -131,3 +131,12 @@ export const adoptMissAsTerm = (id, conceptCode) =>
 export const revokeMiss = (id) => request.post(`/ontology/misses/${id}/revoke`)
 
 export const classifyMiss = (id) => request.post(`/ontology/misses/${id}/classify`)
+
+// ---------- AI 提案队列（P1a：AI 提议人裁决） ----------
+export const fetchProposals = (params) => request.get('/proposal/list', { params })
+
+export const runProposalGeneration = () => request.post('/proposal/run')
+
+export const adoptProposal = (id) => request.post(`/proposal/${id}/adopt`)
+
+export const rejectProposal = (id, reason) => request.post(`/proposal/${id}/reject`, { reason })

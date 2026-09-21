@@ -33,9 +33,16 @@ class MetricMonitorTest {
     @Test
     void evaluateAllShouldCoverMonitoredMetrics() {
         List<Map<String, Object>> all = metricService.evaluateAll();
-        assertEquals(4, all.size(), "四个指标均已绑定探针");
+        // 种子 4 条 + 真实库试点新增(mo_lis 危急值报告数/检验申请总数)——按编码断言,不锁死总数:
+        // 真实数据源接入后指标会增长,厂商库的真实告警(如危急值)也是合法告警
+        List<String> codes = all.stream().map(m -> String.valueOf(m.get("metricCode"))).toList();
+        assertTrue(codes.containsAll(List.of("DISCHARGE_COUNT", "LAB_CANCEL_RATE", "AVG_INP_FEE", "CANCEL_NOT_REFUND")),
+                "种子指标应全部被巡检覆盖");
         long alarms = all.stream().filter(m -> Boolean.TRUE.equals(m.get("alarm"))).count();
-        assertEquals(1, alarms, "只有取消未退费应告警");
+        assertTrue(alarms >= 1, "已绑定探针的指标应全部被巡检(种子4条+试点新增)");
+        assertTrue(all.stream().filter(m -> Boolean.TRUE.equals(m.get("alarm")))
+                        .anyMatch(m -> "CANCEL_NOT_REFUND".equals(m.get("metricCode"))),
+                "取消未退费必须告警");
     }
 
     @Test

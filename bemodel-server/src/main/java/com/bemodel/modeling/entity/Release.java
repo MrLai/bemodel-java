@@ -17,5 +17,8 @@ public class Release {
     private Integer elementCount;
     private String snapshotJson;
     private String releasedBy;
+    /** 审批人/审批时间（V29）：谁批准了这版口径 */
+    private String approvedBy;
+    private LocalDateTime approvedAt;
     private LocalDateTime createdAt;
 }

@@ -95,12 +95,11 @@
                       style="margin-left: 4px"
                     >AI</el-tag>
                     <el-tag
-                      v-if="row.mapping.confirmed === 1"
                       size="small"
-                      type="success"
+                      :type="statusMeta(row.mapping.status).type"
                       effect="plain"
                       style="margin-left: 4px"
-                    >已确认</el-tag>
+                    >{{ statusMeta(row.mapping.status).label }}</el-tag>
                   </template>
                   <el-tag v-else type="info" effect="plain">未映射</el-tag>
                 </template>
@@ -126,9 +125,23 @@
                   <span v-else class="no-suggest">-</span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="!userStore.isViewer" label="操作" width="110" fixed="right">
+              <el-table-column v-if="!userStore.isViewer" label="操作" width="200" fixed="right">
                 <template #default="{ row }">
                   <el-button size="small" @click="openEdit(row)">编辑映射</el-button>
+                  <el-button
+                    v-if="row.mapping && row.mapping.status !== 'ACTIVE'"
+                    size="small"
+                    type="success"
+                    plain
+                    @click="doTransition(row.mapping)"
+                  >生效</el-button>
+                  <el-button
+                    v-else-if="row.mapping"
+                    size="small"
+                    type="warning"
+                    plain
+                    @click="doTransition(row.mapping)"
+                  >停用</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -217,7 +230,9 @@ import {
   listMappings,
   saveMappings,
   aiSuggest,
-  deleteMapping
+  deleteMapping,
+  transitionMapping,
+  mappingLog
 } from '../../api/datasource'
 import { conceptDetail } from '../../api/ontology'
 import { useConceptStore } from '../../store/concept'
@@ -319,11 +334,26 @@ const loadWorkbench = async () => {
   }
 }
 
+// ---------- 映射生命周期（V30） ----------
+const STATUS_META = {
+  PROPOSED: { label: '待生效', type: 'warning' },
+  ACTIVE: { label: '生效中', type: 'success' },
+  DEPRECATED: { label: '已停用', type: 'info' }
+}
+const statusMeta = (s) => STATUS_META[s || 'ACTIVE'] || { label: s, type: 'info' }
+
+const doTransition = async (m) => {
+  const target = m.status === 'ACTIVE' ? 'DEPRECATED' : 'ACTIVE'
+  await transitionMapping(m.id, target)
+  ElMessage.success(target === 'ACTIVE' ? '映射已生效' : '映射已停用（可重新启用）')
+  loadWorkbench()
+}
+
 // ---------- AI 推荐 ----------
 const runAiSuggest = async () => {
   aiLoading.value = true
   const loadingInstance = ElLoading.service({
-    text: 'deepseek-v4-flash 推理中，请稍候…',
+    text: 'AI 推理中，宽表可能需要数分钟，请稍候…',
     background: 'rgba(255, 255, 255, 0.7)'
   })
   try {
@@ -335,8 +365,11 @@ const runAiSuggest = async () => {
     }
     suggestions.value = map
     accepted.value = new Set()
+    const base = res.llmUsed
+      ? `AI 推荐完成，共 ${res.suggestions?.length || 0} 条建议`
+      : 'LLM 不可用，已按规则降级推荐'
     ElMessage.success(
-      res.llmUsed ? `AI 推荐完成，共 ${res.suggestions?.length || 0} 条建议` : 'LLM 不可用，已按规则降级推荐'
+      (res.failedBatches || 0) > 0 ? `${base}（${res.failedBatches} 批调用失败，已按规则补齐）` : base
     )
   } finally {
     loadingInstance.close()
@@ -357,11 +390,11 @@ const saveAccepted = async () => {
       columnName: r.columnName,
       conceptCode: r.suggestion.conceptCode,
       attrCode: r.suggestion.attrCode,
-      confirmed: 1,
+      confirmed: 0,
       source: 'AI'
     }))
     await saveMappings(payload)
-    ElMessage.success(`已保存 ${payload.length} 条映射`)
+    ElMessage.success(`已保存 ${payload.length} 条提议映射（待建模员生效）`)
     suggestions.value = {}
     aiMeta.value = null
     loadWorkbench()

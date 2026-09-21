@@ -57,7 +57,8 @@ public class ImpactService {
 
         // 受影响物理映射：按产品库分组
         List<Mapping> mappings = mappingMapper.selectList(
-                new LambdaQueryWrapper<Mapping>().eq(Mapping::getConceptCode, conceptCode));
+                new LambdaQueryWrapper<Mapping>().eq(Mapping::getConceptCode, conceptCode)
+                        .eq(Mapping::getStatus, "ACTIVE")); // 影响面只算生效映射（V30）
         Map<String, List<String>> affectedTables = mappings.stream().collect(Collectors.groupingBy(
                 Mapping::getDsCode,
                 LinkedHashMap::new,

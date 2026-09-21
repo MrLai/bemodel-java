@@ -509,7 +509,7 @@
             <div class="card-header">
               <span>评估意见</span>
               <el-tag size="small" effect="plain" :type="impactResult.llmUsed ? 'success' : 'info'">
-                {{ impactResult.llmUsed ? 'deepseek-v4-flash 生成' : '规则降级生成' }}
+                {{ impactResult.llmUsed ? 'AI 生成' : '规则降级生成' }}
               </el-tag>
             </div>
           </template>
@@ -522,13 +522,14 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElLoading, ElMessageBox } from 'element-plus'
 import { listLinks, linkChain, linkChainRels, createLink, analyzeImpact, autoTicket, traceLink, createRel, deleteRel } from '../../api/link'
 import { useConceptStore } from '../../store/concept'
 import { useUserStore } from '../../store/user'
 
 const router = useRouter()
+const route = useRoute()
 const conceptStore = useConceptStore()
 const userStore = useUserStore()
 
@@ -963,7 +964,7 @@ const runImpact = async () => {
   }
   analyzing.value = true
   const loadingInstance = ElLoading.service({
-    text: 'deepseek-v4-flash 正在评估影响面...',
+    text: 'AI 正在评估影响面...',
     background: 'rgba(255, 255, 255, 0.7)'
   })
   try {
@@ -1007,6 +1008,9 @@ const runAutoTicket = async () => {
 }
 
 onMounted(() => {
+  // 深链承接：/link?concept=X（证据链「链路追溯」锚点等）——按概念过滤进入
+  const c0 = route.query.concept
+  if (c0) filterConcept.value = String(c0)
   conceptStore.fetchAll()
   loadNodes()
   loadChain()

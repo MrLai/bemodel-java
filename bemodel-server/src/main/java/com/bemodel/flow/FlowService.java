@@ -2,13 +2,16 @@ package com.bemodel.flow;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bemodel.datasource.entity.Mapping;
+import com.bemodel.datasource.event.MappingChangedEvent;
 import com.bemodel.datasource.mapper.MappingMapper;
 import com.bemodel.datasource.service.DatasourceService;
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.common.PageResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -38,9 +41,9 @@ public class FlowService {
             params.add("%" + keyword + "%");
         }
         Long total = his.queryForObject("SELECT COUNT(*) FROM inpatient " + where, Long.class, params.toArray());
-        List<Map<String, Object>> visits = his.queryForList(
+        List<Map<String, Object>> visits = Masking.maskPatientRows(his.queryForList(
                 "SELECT * FROM inpatient " + where + "ORDER BY admit_time DESC LIMIT " + pageSize
-                        + " OFFSET " + (pageNum - 1) * pageSize, params.toArray());
+                        + " OFFSET " + (pageNum - 1) * pageSize, params.toArray()));
         for (Map<String, Object> v : visits) {
             String inhosNo = String.valueOf(v.get("inhos_no"));
             Map<String, Object> agg = his.queryForMap(
@@ -67,7 +70,7 @@ public class FlowService {
         if (visits.isEmpty()) {
             throw new BizException("住院就诊不存在: " + inhosNo);
         }
-        Map<String, Object> visit = visits.get(0);
+        Map<String, Object> visit = Masking.maskPatientRow(visits.get(0));
 
         List<Map<String, Object>> orders = his.queryForList(
                 "SELECT * FROM medical_order WHERE inhos_no = ? ORDER BY create_time", inhosNo);
@@ -288,10 +291,10 @@ public class FlowService {
             params.add("%" + keyword + "%");
         }
         Long total = opd.queryForObject("SELECT COUNT(*) FROM opd_reg r " + where, Long.class, params.toArray());
-        List<Map<String, Object>> regs = opd.queryForList(
+        List<Map<String, Object>> regs = Masking.maskPatientRows(opd.queryForList(
                 "SELECT r.*, v.visit_id, v.diag, v.status AS visit_status FROM opd_reg r " +
                         "LEFT JOIN opd_visit v ON v.card_no = r.pat_card_no " + where + "ORDER BY r.reg_time DESC LIMIT "
-                        + pageSize + " OFFSET " + (pageNum - 1) * pageSize, params.toArray());
+                        + pageSize + " OFFSET " + (pageNum - 1) * pageSize, params.toArray()));
         for (Map<String, Object> r : regs) {
             Map<String, Object> agg = opd.queryForMap(
                     "SELECT COUNT(*) AS presc_cnt, IFNULL(SUM(CASE WHEN presc_status='3' THEN price END),0) AS exec_total " +
@@ -316,7 +319,7 @@ public class FlowService {
         if (regs.isEmpty()) {
             throw new BizException("就诊卡号不存在: " + cardNo);
         }
-        Map<String, Object> reg = regs.get(0);
+        Map<String, Object> reg = Masking.maskPatientRow(regs.get(0));
         reg.put("regStatusName", decode("DS_OPD", "opd_reg", "reg_status", reg.get("reg_status")));
 
         List<Map<String, Object>> timeline = new ArrayList<>();
@@ -329,7 +332,7 @@ public class FlowService {
 
         List<Map<String, Object>> visits = opd.queryForList(
                 "SELECT * FROM opd_visit WHERE card_no = ?", cardNo);
-        Map<String, Object> visit = visits.isEmpty() ? null : visits.get(0);
+        Map<String, Object> visit = visits.isEmpty() ? null : Masking.maskPatientRow(visits.get(0));
         if (visit != null) {
             visit.put("statusName", decode("DS_OPD", "opd_visit", "status", visit.get("status")));
             timeline.add(event(visit.get("visit_time"), "门诊", "看诊",
@@ -482,6 +485,15 @@ public class FlowService {
     /** 用平台映射元数据中的值字典，把物理状态码翻译成标准口径 */
     private final Map<String, Map<String, String>> valueMapCache = new HashMap<>();
 
+    /**
+     * 映射生命周期/编辑/删除后失效值字典缓存：没有这一步，ACTIVE 门禁会被永不失效的缓存架空——
+     * 停用后流程运行时仍按旧字典翻译，PROPOSED 期间查过的列也永远进不来新生效映射。
+     */
+    @EventListener
+    public void onMappingChanged(MappingChangedEvent e) {
+        valueMapCache.clear();
+    }
+
     private String decode(String dsCode, String table, String column, Object raw) {
         if (raw == null) {
             return "-";
@@ -491,7 +503,9 @@ public class FlowService {
             Mapping m = mappingMapper.selectOne(new LambdaQueryWrapper<Mapping>()
                     .eq(Mapping::getDsCode, dsCode)
                     .eq(Mapping::getTableName, table)
-                    .eq(Mapping::getColumnName, column));
+                    .eq(Mapping::getColumnName, column)
+                    .eq(Mapping::getStatus, "ACTIVE") // 流程运行时只消费生效映射（V30）
+                    .last("LIMIT 1"));
             if (m == null || m.getValueMap() == null) {
                 return Map.of();
             }

@@ -49,6 +49,8 @@ public class CsService {
     private final CsFeedbackMapper csFeedbackMapper;
     private final com.bemodel.ontology.mapper.ConceptMapper conceptMapper;
     private final com.bemodel.ontology.mapper.MetricMapper metricMapper;
+    private final ReconciliationService reconciliationService;
+    private final ClarifyService clarifyService;
 
     /**
      * 工单智能诊断：已有完成的诊断直接复用，否则自动执行（客服无感，打开即得结论）。
@@ -194,6 +196,11 @@ public class CsService {
      * 兜底场景菜单（转介客服）。LLM 只做意图归类，数字一律来自真实查询。
      */
     public Map<String, Object> ask(String question, String scene) {
+        return ask(question, scene, null);
+    }
+
+    /** resumeTask 非空 = 澄清任务续跑重入：A 型歧义时推进轮次/封顶，而不是新建任务 */
+    private Map<String, Object> ask(String question, String scene, ClarifyTask resumeTask) {
         String q = question == null ? "" : question.trim();
         boolean analytics = SCENE_ANALYTICS.equals(normalizeScene(scene));
         String intent = null;
@@ -205,6 +212,9 @@ public class CsService {
             Map<String, Object> g = glossaryAnswer(q, false, true);
             if (g != null && "METRIC".equals(g.get("card"))) {
                 g.putIfAbsent("router", "RULE");
+                if (resumeTask != null) {
+                    g.put("clarifyAnswered", true);
+                }
                 return g;
             }
         }
@@ -220,31 +230,96 @@ public class CsService {
                 router = "RULE";
             }
         }
-        // 语义路径单列：答不了时问题已回流增长回路，missRecorded 供前端显式判断（不做字符串嗅探）
+        // 语义路径单列：答不了时按缺口分型处理——A 型歧义建澄清任务（不记 miss），
+        // V/P 型照旧回流增长回路；missRecorded/clarifyTask 均为后端显式字段，前端按存在性渲染
         if ("SEMANTIC_QUERY".equals(intent)) {
             SemanticQaService.Outcome outcome = semanticQaService.answer(q, analytics);
             if (outcome.result() != null) {
                 outcome.result().putIfAbsent("router", router); // 语义查询处理器自带 router=SEMANTIC
+                if (resumeTask != null) {
+                    outcome.result().put("clarifyAnswered", true);
+                }
                 return outcome.result();
             }
             Map<String, Object> menu = analytics ? analyticsMenu(q) : capabilityMenu(q);
             menu.put("router", router);
+            // A 型歧义：建任务或续跑推进（轮次封顶 → GAVE_UP 回流），全程不记 miss
+            if ("AMBIGUITY".equals(outcome.gapType())) {
+                ClarifyTask task = resumeTask == null
+                        ? clarifyService.createTask(normalizeScene(scene), q, outcome.reason(), "AMBIGUITY")
+                        : null;
+                if (task != null) {
+                    menu.put("clarifyTask", clarifyService.view(task));
+                    return menu;
+                }
+                if (clarifyService.enterNextRound(resumeTask, outcome.reason())) {
+                    menu.put("clarifyTask", clarifyService.view(resumeTask));
+                } else {
+                    // 封顶（rounds=2）：任务置 GAVE_UP，问题此时才回流增长回路（miss 附任务对话证据）
+                    clarifyService.giveUp(resumeTask);
+                    menu.put("missRecorded", true);
+                    menu.put("clarifyGaveUp", true);
+                    menu.put("answer", menu.get("answer")
+                            + "两轮澄清仍未收敛，这个问题已连同一轮澄清证据记录为本体完善提案（本体页-扩展提案可见）。");
+                }
+                return menu;
+            }
             if (outcome.recordedMiss()) {
                 menu.put("missRecorded", true);
                 menu.put("answer", menu.get("answer")
                         + "这个问题已记录为本体完善提案（本体页-扩展提案可见）。");
+                if (resumeTask != null) {
+                    // 续跑途中缺口转定性为 V 型（词表缺口）：任务收口 GAVE_UP，miss_id 回填（miss 已由标准路径记录）
+                    clarifyService.giveUp(resumeTask);
+                    menu.put("clarifyGaveUp", true);
+                }
+                return menu;
+            }
+            if (resumeTask != null) {
+                // 续跑中 LLM 计划失败（非缺口）：任务保持 PENDING，用户可重试补充，不断链不伪装
+                menu.put("clarifyRetry", true);
             }
             return menu;
         }
         Map<String, Object> r = intent == null ? null : dispatch(intent, q);
         if (r != null) {
             r.putIfAbsent("router", router);
+            if (resumeTask != null) {
+                r.put("clarifyAnswered", true);
+            }
             return r;
         }
         // 未命中 → 场景化兜底菜单（内含向另一场景带原问题的转介入口），显式 REFERRAL 标记
         Map<String, Object> menu = analytics ? analyticsMenu(q) : capabilityMenu(q);
         menu.put("router", intent != null ? router : "REFERRAL");
         return menu;
+    }
+
+    /**
+     * 澄清续跑（D2b）：q' = 原问题 +（补充）重入同一路由——resume pointer 有意做到最薄，
+     * 不引入步骤状态机。补充只作为查询约束注入提问，不成为事实来源；
+     * 结果三态：真实答案→RESOLVED（带 clarifyResolved）；二轮追问卡；封顶/转定性→GAVE_UP 回流。
+     */
+    public Map<String, Object> clarifyAnswer(Long id, String supplement) {
+        ClarifyTask task = clarifyService.acceptSupplement(id, supplement);
+        // 结构化拼接，不做自由改写：原问题（补充约束）重入问数路由
+        Map<String, Object> r = ask(task.getOriginQuestion() + "（" + task.getSupplement() + "）",
+                SCENE_ANALYTICS, task);
+        r.put("clarifyTaskId", task.getId());
+        if (r.containsKey("clarifyTask") || Boolean.TRUE.equals(r.get("clarifyGaveUp"))
+                || Boolean.TRUE.equals(r.get("clarifyRetry"))) {
+            return r;
+        }
+        if (Boolean.TRUE.equals(r.get("clarifyAnswered"))) {
+            // 真实答案由 ask() 显式标记（口径卡/语义结果/意图答出），不做「失败标记缺席」的反向推断：
+            // 兜底菜单不是答案，任务保持 PENDING，可换措辞再补（否则菜单会被误标「已答出」）
+            clarifyService.resolve(task);
+            r.put("clarifyResolved", true);
+            return r;
+        }
+        // 兜底菜单：补充已记录但本轮未命中答案，任务保持 PENDING 不误标 RESOLVED
+        r.put("clarifyRetry", true);
+        return r;
     }
 
     private String routeByKeyword(String q, boolean analytics) {
@@ -425,50 +500,56 @@ public class CsService {
         return result;
     }
 
-    /** 意图：缴费与发药双向核对（先药后费违规 / 已缴费未发药滞留）—— 三库实时核对 */
+    /** 意图：缴费与发药双向核对（D2 语义化：分档+归因+差异登记）—— 三库实时核对 */
     private Map<String, Object> dispensePayAnswer(String q) {
         Map<String, Object> result = baseResult(q);
-        JdbcTemplate pharmacy = datasourceService.jdbc("DS_PHARMACY");
-        JdbcTemplate charge = datasourceService.jdbc("DS_CHARGE");
-        JdbcTemplate his = datasourceService.jdbc("DS_HIS");
-        Set<String> paid = new HashSet<>(charge.queryForList(
-                "SELECT DISTINCT inhos_no FROM pay_record WHERE pay_type IN ('1','2','4')", String.class));
-
-        // 方向A：已发药但患者无任何缴费记录（先药后费，违规）
-        List<Map<String, Object>> dispensed = pharmacy.queryForList(
-                "SELECT dispense_id, patient_no, item_name FROM dispense_record WHERE status = '1'");
-        List<Map<String, Object>> unpaid = dispensed.stream()
-                .filter(d -> !paid.contains(String.valueOf(d.get("patient_no"))))
-                .toList();
-
-        // 方向B：药品医嘱已计费且患者有缴费，但药房无发药记录或仅有已退药（滞留积压）——跨库内存 join
-        List<Map<String, Object>> chargedDrugOrders = his.queryForList(
-                "SELECT DISTINCT o.order_id, o.inhos_no, o.item_name FROM medical_order o "
-                        + "JOIN fee_detail f ON f.order_id = o.order_id "
-                        + "WHERE o.order_type = '药品' AND o.order_status IN ('0','1')");
-        Set<String> delivered = new HashSet<>(pharmacy.queryForList(
-                "SELECT DISTINCT order_id FROM dispense_record WHERE status IN ('0','1')", String.class));
-        List<Map<String, Object>> backlog = chargedDrugOrders.stream()
-                .filter(o -> paid.contains(String.valueOf(o.get("inhos_no")))
-                        && !delivered.contains(String.valueOf(o.get("order_id"))))
-                .toList();
-
-        result.put("intent", "缴费发药双向核对");
+        Map<String, Object> recon = reconciliationService.reconcileDispensePay();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> tiers = (List<Map<String, Object>>) recon.get("tiers");
+        int abnormal = (Integer) recon.get("abnormalCount");
+        result.put("intent", "缴费发药双向核对（语义档）");
         result.put("answer", String.format(
-                "流程规则：缴费是发药的前置环节，先药后费属违规；反方向「已缴费未发药」是发药滞留，同样需要核查。"
-                        + "跨三库实测：已发药 %d 笔中先药后费 %d 笔；已计费药品医嘱 %d 条中已缴费未发药 %d 条%s。",
-                dispensed.size(), unpaid.size(), chargedDrugOrders.size(), backlog.size(),
-                unpaid.isEmpty() && backlog.isEmpty() ? "，两个方向都无异常" : "，异常需逐笔核查"));
-        result.put("evidence", List.of(
-                Map.of("label", "先药后费（违规）", "value", unpaid.size() + " 笔 / 已发药共 " + dispensed.size() + " 笔"),
-                Map.of("label", "已缴费未发药（滞留）", "value", backlog.size() + " 条 / 已计费药品医嘱共 "
-                        + chargedDrugOrders.size() + " 条"),
-                Map.of("label", "数据来源", "value",
-                        "DS_PHARMACY.dispense_record × DS_CHARGE.pay_record × DS_HIS.medical_order×fee_detail 内存核对")));
+                "流程规则：缴费是发药的前置环节，先药后费属违规；反方向按归因分档：「在途待发」与"
+                        + "「凌晨批量取消」是正常差异（显式登记防误判），「真滞留」「付费后取消」需核查，"
+                        + "退药未退费是待完成中间态。跨三库实测：%d 个差异档，异常合计 %d 项，已逐条登记可查。",
+                tiers.size(), abnormal));
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        for (Map<String, Object> t : tiers) {
+            evidence.add(Map.of(
+                    "label", severityLabel((String) t.get("severity")) + "·" + tierLabel((String) t.get("stateCode")),
+                    "value", t.get("count") + " / 共 " + t.get("total") + "｜" + t.get("suggestedAction")));
+        }
+        evidence.add(Map.of("label", "数据来源", "value",
+                "DS_PHARMACY.dispense_record × DS_CHARGE.pay_record × DS_HIS.medical_order×fee_detail，"
+                        + "差异已登记 runId=" + recon.get("runId")));
+        result.put("evidence", evidence);
+        result.put("tiers", tiers);
+        result.put("runId", recon.get("runId"));
         result.put("links", List.of(
+                Map.of("label", "查本批次差异登记", "route", "/cs?recon=" + recon.get("runId")),
                 Map.of("label", "去流程演示页看住院闭环", "route", "/flow"),
                 Map.of("label", "去本体页看发药记录概念", "route", "/ontology?concept=DISPENSE")));
         return result;
+    }
+
+    private static String severityLabel(String severity) {
+        return switch (severity) {
+            case "VIOLATION" -> "违规";
+            case "WATCH" -> "待核查";
+            default -> "正常差异";
+        };
+    }
+
+    private static String tierLabel(String stateCode) {
+        return switch (stateCode) {
+            case "VIOLATION_PREPAY_BYPASS" -> "先药后费";
+            case "RETURNED_PENDING_REFUND" -> "已退药待退费";
+            case "STUCK_BACKLOG" -> "真滞留";
+            case "IN_FLIGHT" -> "在途待发";
+            case "CANCELLED_AFTER_PAY" -> "付费后取消";
+            case "NIGHTLY_CANCEL" -> "凌晨批量取消";
+            default -> stateCode;
+        };
     }
 
     /** 意图：一个医嘱能否拆成多次/分开发药 —— 医嘱×发药 1:N 关系的实时核对 */

@@ -1,10 +1,14 @@
 package com.bemodel.ontology.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.bemodel.datasource.entity.Mapping;
+import com.bemodel.datasource.mapper.MappingMapper;
+import com.bemodel.ontology.entity.Attribute;
 import com.bemodel.ontology.entity.Concept;
 import com.bemodel.ontology.entity.ConceptParent;
 import com.bemodel.ontology.entity.Disjoint;
 import com.bemodel.ontology.entity.Relation;
+import com.bemodel.ontology.mapper.AttributeMapper;
 import com.bemodel.ontology.mapper.ConceptMapper;
 import com.bemodel.ontology.mapper.ConceptParentMapper;
 import com.bemodel.ontology.mapper.DisjointMapper;
@@ -34,6 +38,8 @@ public class OntologyCheckService {
     private final ConceptMapper conceptMapper;
     private final DisjointMapper disjointMapper;
     private final ConceptParentMapper conceptParentMapper;
+    private final AttributeMapper attributeMapper;
+    private final MappingMapper mappingMapper;
 
     public record Defect(String type, String severity, String message, List<String> refs) {
     }
@@ -49,6 +55,11 @@ public class OntologyCheckService {
         checkDisjoint(disjoints, concepts, defects);
         checkIriDuplicate(concepts, defects);
         checkSubClassCycle(parents, defects);
+        // D1 属性覆盖门禁：已发布概念的属性定义与生效映射覆盖（试点教训固化）
+        List<Attribute> attributes = attributeMapper.selectList(null);
+        List<Mapping> activeMappings = mappingMapper.selectList(
+                new LambdaQueryWrapper<Mapping>().eq(Mapping::getStatus, "ACTIVE"));
+        checkAttributeCoverage(concepts, attributes, activeMappings, defects);
 
         defects.sort(Comparator.comparing(Defect::type)
                 .thenComparing(d -> String.join(",", d.refs())));
@@ -203,6 +214,49 @@ public class OntologyCheckService {
                 List<String> codes = e.getValue().stream().sorted().toList();
                 defects.add(new Defect("IRI_DUPLICATE", "BLOCKER",
                         "多个概念共用同一 IRI: " + e.getKey(), codes));
+            }
+        }
+    }
+
+    // ---------- 属性覆盖门禁（D1，试点教训固化） ----------
+
+    /**
+     * 发布口径的两个覆盖缺口（WARN 级，配合发布门禁：不自检清零就须 force 显式放行）：
+     * 1) CONCEPT_NO_ATTR：已发布概念没有任何属性定义——裸概念，问数/投影无字段可还原；
+     * 2) ATTR_MAPPING_COVERAGE：已发布概念的属性没有生效映射承载——实例投影/语义问数在这些属性上
+     *    静默缺失（试点教训：mo_lis 试点中"概念已发布、物理列未绑定"曾导致问数答案静默缺列）。
+     */
+    private void checkAttributeCoverage(List<Concept> concepts, List<Attribute> attributes,
+                                        List<Mapping> activeMappings, List<Defect> defects) {
+        Map<String, Set<String>> mappedAttrByConcept = activeMappings.stream()
+                .collect(Collectors.groupingBy(Mapping::getConceptCode,
+                        Collectors.mapping(Mapping::getAttrCode, Collectors.toSet())));
+        Map<String, Set<String>> attrsByConcept = attributes.stream()
+                .collect(Collectors.groupingBy(Attribute::getConceptCode,
+                        Collectors.mapping(Attribute::getAttrCode, Collectors.toSet())));
+        List<Concept> published = concepts.stream()
+                .filter(c -> "PUBLISHED".equals(c.getStatus()))
+                .sorted(Comparator.comparing(Concept::getCode)).toList();
+        for (Concept c : published) {
+            Set<String> attrs = attrsByConcept.getOrDefault(c.getCode(), Set.of());
+            if (attrs.isEmpty()) {
+                defects.add(new Defect("CONCEPT_NO_ATTR", "WARN",
+                        "已发布概念没有任何属性定义（裸概念），下游无字段可消费", List.of(c.getCode())));
+                continue;
+            }
+            Set<String> mapped = mappedAttrByConcept.getOrDefault(c.getCode(), Set.of());
+            List<String> missing = attrs.stream().filter(a -> !mapped.contains(a))
+                    .sorted().toList();
+            if (!missing.isEmpty()) {
+                List<String> shown = missing.size() > 8 ? missing.subList(0, 8) : missing;
+                List<String> refs = new ArrayList<>();
+                refs.add(c.getCode());
+                refs.addAll(shown);
+                defects.add(new Defect("ATTR_MAPPING_COVERAGE", "WARN",
+                        String.format("属性缺生效映射 %d/%d（发布后实例投影与问数将静默缺失）: %s%s",
+                                missing.size(), attrs.size(), String.join("、", shown),
+                                missing.size() > 8 ? " …" : ""),
+                        refs));
             }
         }
     }

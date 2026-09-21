@@ -2,6 +2,7 @@ package com.bemodel.instance;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.datasource.entity.Mapping;
 import com.bemodel.datasource.mapper.MappingMapper;
 import com.bemodel.datasource.service.DatasourceService;
@@ -39,6 +40,11 @@ public class InstanceService {
         if (concept == null) {
             throw new BizException("概念不存在: " + conceptCode);
         }
+        // 废弃概念隔离（维护治理加固 H3）：显式拒绝而非静默空结果，
+        // 废弃概念的物理表仍在，投影出来会让人误以为口径仍生效
+        if ("DEPRECATED".equals(concept.getStatus())) {
+            throw new BizException("概念已废弃: " + conceptCode + "，仅供追溯，不再投影实例数据");
+        }
         List<Attribute> attrs = attributeMapper.selectList(
                 new LambdaQueryWrapper<Attribute>().eq(Attribute::getConceptCode, conceptCode)
                         .orderByAsc(Attribute::getSort));
@@ -46,7 +52,8 @@ public class InstanceService {
                 .collect(Collectors.toMap(Attribute::getAttrCode, Attribute::getAttrName, (a, b) -> a));
 
         List<Mapping> mappings = mappingMapper.selectList(
-                new LambdaQueryWrapper<Mapping>().eq(Mapping::getConceptCode, conceptCode));
+                new LambdaQueryWrapper<Mapping>().eq(Mapping::getConceptCode, conceptCode)
+                        .eq(Mapping::getStatus, "ACTIVE")); // 生命周期（V30）：实例投影只消费生效映射
         // 按数据源+物理表分组，映射列多的表排前面（主载体表优先）
         Map<String, List<Mapping>> byTable = mappings.stream().collect(Collectors.groupingBy(
                 m -> m.getDsCode() + "@" + m.getTableName(), LinkedHashMap::new, Collectors.toList()));
@@ -76,8 +83,14 @@ public class InstanceService {
                 Map<String, Object> inst = new LinkedHashMap<>();
                 for (Mapping m : cols) {
                     Object raw = row.get(m.getColumnName());
-                    inst.put(attrNameByCode.getOrDefault(m.getAttrCode(), m.getAttrCode()),
-                            decodeValue(m, raw));
+                    String attrKey = attrNameByCode.getOrDefault(m.getAttrCode(), m.getAttrCode());
+                    Object value = decodeValue(m, raw);
+                    // 患者姓名类列在投影出口打码（inhos_no 等业务键列保留）
+                    if ((Masking.isNameKey(m.getColumnName()) || Masking.isNameKey(attrKey))
+                            && !"-".equals(value)) {
+                        value = Masking.maskName(String.valueOf(value));
+                    }
+                    inst.put(attrKey, value);
                 }
                 projected.add(inst);
             }

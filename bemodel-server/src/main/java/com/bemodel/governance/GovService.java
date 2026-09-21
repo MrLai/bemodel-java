@@ -2,6 +2,7 @@ package com.bemodel.governance;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bemodel.common.BizException;
+import com.bemodel.common.Masking;
 import com.bemodel.common.PageResult;
 import com.bemodel.datasource.entity.Mapping;
 import com.bemodel.datasource.entity.PhysicalColumn;
@@ -274,7 +275,8 @@ public class GovService {
     public Map<String, Object> overview() {
         long tableCount = physicalTableMapper.selectCount(null);
         long colCount = physicalColumnMapper.selectCount(null);
-        long mappedCount = mappingMapper.selectList(null).stream()
+        long mappedCount = mappingMapper.selectList(new LambdaQueryWrapper<Mapping>()
+                .eq(Mapping::getStatus, "ACTIVE")).stream() // 覆盖率只统计生效映射（V30）
                 .map(m -> m.getDsCode() + "@" + m.getTableName() + "@" + m.getColumnName())
                 .distinct().count();
 
@@ -300,7 +302,8 @@ public class GovService {
     public List<Map<String, Object>> tables() {
         List<PhysicalTable> tables = physicalTableMapper.selectList(null);
         List<PhysicalColumn> columns = physicalColumnMapper.selectList(null);
-        List<Mapping> mappings = mappingMapper.selectList(null);
+        List<Mapping> mappings = mappingMapper.selectList(new LambdaQueryWrapper<Mapping>()
+                .eq(Mapping::getStatus, "ACTIVE")); // 治理画像只看生效映射（V30）
         Map<String, Concept> concepts = conceptMapper.selectList(null).stream()
                 .collect(Collectors.toMap(Concept::getCode, c -> c, (a, b) -> a));
 
@@ -419,7 +422,7 @@ public class GovService {
                             "WHERE o.order_status = '2' AND f.fee_status = '1' LIMIT 1");
             if (!affected.isEmpty()) {
                 ticket.setPayload("{\"inhos_no\":\"" + affected.get(0).get("inhos_no")
-                        + "\",\"patient\":\"" + affected.get(0).get("patient_name") + "\"}");
+                        + "\",\"patient\":\"" + Masking.maskName(String.valueOf(affected.get(0).get("patient_name"))) + "\"}");
             }
         } else {
             ticket.setConceptCode(issue.getConceptCode());

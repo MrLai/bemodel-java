@@ -90,6 +90,13 @@
             </template>
           </el-table-column>
           <el-table-column prop="model" label="模型" width="150" />
+          <el-table-column label="提供方" width="80">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain" :type="row.provider === 'backup' ? 'warning' : 'info'">
+                {{ row.provider === 'backup' ? '备路' : '主路' }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="本体版本" width="90">
             <template #default="{ row }">
               <el-tag size="small" effect="plain">{{ row.ontologyVersion }}</el-tag>
@@ -277,8 +284,10 @@
   </el-dialog>
 
   <!-- 版本快照 -->
-  <el-dialog v-model="snapshotVisible" :title="`版本快照：${snapshotRelease?.versionTag || ''}`" width="640px">
+  <el-dialog v-model="snapshotVisible" :title="`版本快照：${snapshotRelease?.versionTag || ''}`" width="960px">
     <div v-loading="loadingSnapshot">
+      <el-tabs v-model="snapshotTab">
+        <el-tab-pane label="元素清单" name="list">
       <template v-if="snapshot">
         <el-descriptions :column="3" border>
           <el-descriptions-item v-for="(label, key) in snapshotLabels" :key="key" :label="label">
@@ -314,6 +323,40 @@
           <span v-if="!(snapshot.actions || []).length" class="code-empty">无</span>
         </div>
       </template>
+        </el-tab-pane>
+        <el-tab-pane label="全图" name="graph">
+          <template v-if="snapshot">
+            <div class="snapshot-scope-note">
+              口径：概念仅含已发布；关系边按两端概念过滤后折叠展示（与架构全景同规则）。
+            </div>
+            <div class="closure-badges" v-if="closureStats.length">
+              <el-tag
+                v-for="s in closureStats"
+                :key="s.name"
+                size="small"
+                :type="s.capped ? 'danger' : 'info'"
+                effect="plain"
+              >传递闭包 {{ s.name }}：派生 {{ s.derived }} 条{{ s.capped ? '（超深截断）' : '' }}</el-tag>
+            </div>
+            <GraphCanvas
+              v-if="snapshotGraph.nodes.length"
+              :nodes="snapshotGraph.nodes"
+              :edges="snapshotGraph.edges"
+              :categories="snapshotCategories"
+              layout="force"
+              height="520px"
+              :tooltip-formatter="snapshotTooltip"
+            />
+            <el-empty v-else description="该版本无已发布概念可画" :image-size="60" />
+            <div class="graph-legend-tip">
+              <span class="gl-item"><i class="gl-line gl-relation" />关系（绿实线）</span>
+              <span class="gl-item"><i class="gl-line gl-transitive" />可传递（橙色虚线）</span>
+              <span class="gl-item"><i class="gl-arrow">⇄</i>对称（双向箭头）</span>
+              <span class="gl-item">· 尾缀＝约束公理，悬停关系边看含义</span>
+            </div>
+          </template>
+        </el-tab-pane>
+      </el-tabs>
     </div>
   </el-dialog>
 </template>
@@ -331,6 +374,8 @@ import {
   llmStats
 } from '../../../api/release'
 import { checkOntology } from '../../../api/ontology'
+import GraphCanvas from '../../../components/GraphCanvas.vue'
+import { axiomSuffixOf, axiomStyleOf, axiomTooltipOf, foldRelations } from '../../../utils/axiomEdge'
 
 // ---------- 版本发布 ----------
 const releases = ref([])
@@ -428,9 +473,62 @@ const openSnapshot = async (row) => {
   try {
     const detail = await releaseDetail(row.id)
     snapshot.value = JSON.parse(detail.snapshotJson || '{}')
+    snapshotTab.value = 'list'
   } finally {
     loadingSnapshot.value = false
   }
+}
+
+// ---------- 快照全图（spec 2026-09-21 §6）：零后端，snapshotJson 自足 ----------
+const snapshotTab = ref('list')
+
+// 快照 relations 是全状态实体：只画两端概念均已发布的边（口径说明在模板固定展示）
+const snapshotGraph = computed(() => {
+  if (!snapshot.value) return { nodes: [], edges: [] }
+  const concepts = snapshot.value.concepts || []
+  const published = new Set(concepts.map((c) => `C:${c.code}`))
+  const nodes = concepts.map((c) => ({
+    id: `C:${c.code}`,
+    name: c.name,
+    category: c.domainCode || '未分域',
+    symbolSize: 22
+  }))
+  const rels = (snapshot.value.relations || []).filter(
+    (r) => published.has(`C:${r.fromConcept}`) && published.has(`C:${r.toConcept}`)
+  )
+  const edges = foldRelations(rels).map((e) => {
+    const style = axiomStyleOf(e, '#95d475', { width: 1.5, curveness: 0.12 })
+    return {
+      ...e,
+      label: { show: true, formatter: e.label + axiomSuffixOf(e), fontSize: 11, color: '#909399' },
+      ...style,
+      _raw: e
+    }
+  })
+  return { nodes, edges }
+})
+
+const DOMAIN_PALETTE = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#13c2c2', '#d3adf7', '#f5dab1', '#909399']
+const snapshotCategories = computed(() => {
+  const domains = [...new Set(snapshotGraph.value.nodes.map((n) => n.category))]
+  return domains.map((d, i) => ({ name: d, itemStyle: { color: DOMAIN_PALETTE[i % DOMAIN_PALETTE.length] } }))
+})
+
+// 闭包统计徽标（快照只存 stats，不存闭包行；capped=发布时超深截断）
+const closureStats = computed(() => {
+  const rc = snapshot.value?.relationClosures || {}
+  return Object.entries(rc).map(([name, s]) => ({ name, edges: s.edges, derived: s.derived, capped: !!s.capped }))
+})
+
+const snapshotTooltip = (p) => {
+  if (p.dataType === 'edge') {
+    const e = p.data._raw
+    if (!e) return ''
+    const lines = [`<b>${e.label}</b>${axiomSuffixOf(e)}`]
+    for (const l of axiomTooltipOf(e)) lines.push(`<br/>${l}`)
+    return lines.join('')
+  }
+  return p.data.name || ''
 }
 
 // ---------- 变更图谱：相邻版本快照 diff ----------
@@ -586,7 +684,18 @@ const callTypeText = (t) =>
     MAPPING_SUGGEST: '映射推荐',
     SEARCH_ANSWER: '语义搜索',
     RCA_REPORT: '根因报告',
-    IMPACT_ADVICE: '影响评估'
+    IMPACT_ADVICE: '影响评估',
+    CLARIFY_Q: '澄清追问',
+    CS_REPLY: '客服回复',
+    CS_ROUTE: '客服意图',
+    CS_SEMANTIC_PLAN: '问数规划',
+    CS_SEMANTIC_ANSWER: '语义问数',
+    VALUE_SUMMARY: '价值总结',
+    MISS_CLASSIFY: '缺口归类',
+    MISS_PROPOSAL: '缺口提案',
+    QC_REVIEW: '质控点评',
+    LAB_A: '实验A组',
+    LAB_B: '实验B组'
   }[t] || t)
 
 const callTypeTag = (t) =>
@@ -594,7 +703,18 @@ const callTypeTag = (t) =>
     MAPPING_SUGGEST: 'warning',
     SEARCH_ANSWER: 'success',
     RCA_REPORT: 'danger',
-    IMPACT_ADVICE: 'primary'
+    IMPACT_ADVICE: 'primary',
+    CLARIFY_Q: 'primary',
+    CS_REPLY: 'primary',
+    CS_ROUTE: 'primary',
+    CS_SEMANTIC_PLAN: 'primary',
+    CS_SEMANTIC_ANSWER: 'success',
+    VALUE_SUMMARY: 'success',
+    MISS_CLASSIFY: 'warning',
+    MISS_PROPOSAL: 'warning',
+    QC_REVIEW: 'danger',
+    LAB_A: 'info',
+    LAB_B: 'info'
   }[t] || 'info')
 
 const toggleLogRow = (row) => logTableRef.value?.toggleRowExpansion(row)
@@ -935,5 +1055,52 @@ onMounted(() => {
   color: #f87171;
   text-decoration: line-through;
   opacity: 0.7;
+}
+
+.snapshot-scope-note {
+  font-size: 12px;
+  color: #909399;
+  padding-bottom: 8px;
+}
+
+.closure-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.graph-legend-tip {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  padding: 8px 4px 0;
+  font-size: 12px;
+  color: #909399;
+}
+
+.gl-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gl-line {
+  width: 20px;
+  display: inline-block;
+}
+
+.gl-line.gl-relation {
+  border-top: 2px solid #95d475;
+}
+
+.gl-line.gl-transitive {
+  border-top: 2px dashed #e6a23c;
+}
+
+.gl-arrow {
+  font-style: normal;
+  color: #606266;
+  font-weight: 700;
 }
 </style>
